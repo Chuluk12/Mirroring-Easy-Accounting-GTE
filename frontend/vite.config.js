@@ -12,11 +12,13 @@ export default defineConfig(({ mode }) => {
       host: '0.0.0.0',
       port: devPort,
       strictPort: false,
+      allowedHosts: ['easy.gte.co.id', 'localhost'],
     },
     preview: {
       host: '0.0.0.0',
       port: previewPort,
       strictPort: false,
+      allowedHosts: ['easy.gte.co.id', 'localhost'],
     },
     build: {
       rollupOptions: {
