@@ -347,16 +347,30 @@ def login():
     username = data.get("username", "")
     password = data.get("password", "")
     user = get_user(username)
-    if not user or not verify_password(password, user["password"]):
+    if not user:
+        app.logger.warning(f"Login failed: user '{username}' not found.")
         log_activity(
             username=username,
             action="login_failed",
             module="auth",
-            description=f"Login gagal untuk username {username}",
+            description=f"Login gagal untuk username {username} (user not found)",
             ip_address=get_request_ip(),
             user_agent=request.headers.get("User-Agent"),
         )
         return jsonify({"message": "Username atau password salah"}), 401
+        
+    if not verify_password(password, user["password"]):
+        app.logger.warning(f"Login failed: wrong password for user '{username}'.")
+        log_activity(
+            username=username,
+            action="login_failed",
+            module="auth",
+            description=f"Login gagal untuk username {username} (wrong password)",
+            ip_address=get_request_ip(),
+            user_agent=request.headers.get("User-Agent"),
+        )
+        return jsonify({"message": "Username atau password salah"}), 401
+
     permissions = get_user_permissions(user["role"])
     column_permissions = get_user_column_permissions(user["role"])
     additional_claims = {
