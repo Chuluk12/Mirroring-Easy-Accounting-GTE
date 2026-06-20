@@ -1,0 +1,38 @@
+services:
+  backend:
+    build: 
+      context: ./backend
+      dockerfile_inline: |
+        FROM python:3.12-slim
+        WORKDIR /app
+        COPY requirements.txt .
+        RUN pip install --no-cache-dir -r requirements.txt
+        COPY . .
+        EXPOSE 5000
+        CMD ["python", "server.py"]
+    ports:
+      - "5000:5000"
+    env_file:
+      - ./backend/.env
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile_inline: |
+        FROM node:20-alpine
+        WORKDIR /app
+        RUN npm install -g pnpm
+        COPY package*.json pnpm-lock.yaml* ./
+        RUN pnpm install
+        COPY . .
+        EXPOSE 4175 5175
+        CMD ["pnpm", "run", "dev", "--", "--host"]
+    ports:
+      - "4175:4175" # Preview port
+      - "5175:5175" # Dev port
+    env_file:
+      - ./frontend/.env
+    restart: unless-stopped
+    depends_on:
+      - backend
