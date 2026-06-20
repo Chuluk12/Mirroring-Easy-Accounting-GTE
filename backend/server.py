@@ -19,6 +19,7 @@ from integration_api import register_integration_api
 import fdb
 import logging
 import os
+import platform
 import threading
 import time
 
@@ -77,7 +78,23 @@ socketio = SocketIO(
     max_http_buffer_size=50*1024*1024,
 )
 
-fdb.load_api("C:/Program Files/Firebird/Firebird_3_0/fbclient.dll")
+import platform
+
+# ...
+
+# fdb.load_api handling
+fb_dll_path = os.getenv("EASY_FBCLIENT_PATH")
+if not fb_dll_path:
+    if platform.system() == "Windows":
+        fb_dll_path = "C:/Program Files/Firebird/Firebird_3_0/fbclient.dll"
+    else:
+        fb_dll_path = "/usr/lib/x86_64-linux-gnu/libfbclient.so.2" # Default debian/ubuntu path
+
+try:
+    fdb.load_api(fb_dll_path)
+except Exception as e:
+    app.logger.warning(f"Gagal meload firebird client library di {fb_dll_path}: {e}")
+
 
 register_integration_api(app)
 
