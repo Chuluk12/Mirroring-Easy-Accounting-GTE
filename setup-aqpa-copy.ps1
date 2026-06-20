@@ -1,8 +1,6 @@
 $ErrorActionPreference = "Stop"
 
-$source = Split-Path -Parent $MyInvocation.MyCommand.Path
-$parent = Split-Path -Parent $source
-$destination = Join-Path $parent "Easy Dashboard AQPA"
+$destination = Split-Path -Parent $MyInvocation.MyCommand.Path
 $localIp = (
   Get-NetIPAddress -AddressFamily IPv4 |
     Where-Object { $_.IPAddress -notlike "169.254*" -and $_.IPAddress -ne "127.0.0.1" } |
@@ -10,16 +8,6 @@ $localIp = (
 )
 if (-not $localIp) {
   $localIp = "localhost"
-}
-
-if (Test-Path -LiteralPath $destination) {
-  throw "Folder tujuan sudah ada: $destination"
-}
-
-robocopy $source $destination /E /XD ".git" /XF "vite-dev.log" "vite-dev.err.log"
-$robocopyExitCode = $LASTEXITCODE
-if ($robocopyExitCode -gt 7) {
-  throw "Robocopy gagal dengan kode $robocopyExitCode"
 }
 
 @"
@@ -38,6 +26,6 @@ VITE_DEV_PORT=5175
 VITE_PREVIEW_PORT=4175
 "@ | Set-Content -LiteralPath (Join-Path $destination "frontend\.env") -Encoding UTF8
 
-Write-Host "Selesai membuat clone AQPA di: $destination"
+Write-Host "Selesai setup AQPA di: $destination"
 Write-Host "Backend AQPA : http://0.0.0.0:5001"
 Write-Host "Frontend AQPA: http://0.0.0.0:5175"
