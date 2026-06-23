@@ -25,7 +25,6 @@ services:
         WORKDIR /app
         RUN npm install -g pnpm
         COPY package*.json pnpm-lock.yaml* ./
-        RUN pnpm config set strict-peer-dependencies false
         RUN pnpm install
         COPY . .
         EXPOSE 4175 5175
