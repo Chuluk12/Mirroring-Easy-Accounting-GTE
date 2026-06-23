@@ -23,18 +23,7 @@ export default defineConfig(({ mode }) => {
     build: {
       rollupOptions: {
         output: {
-          manualChunks(id) {
-            if (!id.includes('node_modules')) return
-            if (id.includes('react') || id.includes('react-dom') || id.includes('react-router-dom')) {
-              return 'vendor-react'
-            }
-            if (id.includes('antd') || id.includes('@ant-design')) {
-              return 'vendor-antd'
-            }
-            if (id.includes('axios') || id.includes('dayjs')) {
-              return 'vendor-utils'
-            }
-          },
+          manualChunks: undefined,
         },
       },
     },
