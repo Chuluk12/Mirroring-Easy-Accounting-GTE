@@ -6436,7 +6436,7 @@ def api_spk():
         cur.execute(f"""
             SELECT COUNT(DISTINCT w.ID)
             FROM WO w
-            LEFT JOIN WODET det ON det.WOID  = w.ID
+            JOIN WODET det ON det.WOID  = w.ID
             LEFT JOIN SO so     ON so.SOID   = det.SOID
             LEFT JOIN ITEM i    ON i.ITEMNO  = det.ITEMNO
             WHERE {where_sql}
@@ -6447,48 +6447,18 @@ def api_spk():
         cur.execute(f"""
             SELECT COUNT(*)
             FROM WO w
-            LEFT JOIN WODET det ON det.WOID  = w.ID
+            JOIN WODET det ON det.WOID  = w.ID
             LEFT JOIN SO so     ON so.SOID   = det.SOID
             LEFT JOIN ITEM i    ON i.ITEMNO  = det.ITEMNO
             WHERE {where_sql}
         """, params_where)
         total_rows = int(cur.fetchone()[0] or 0)
 
-        cur.execute(f"""
-            SELECT
-                SUM(CASE WHEN spk_status = 2 THEN 1 ELSE 0 END),
-                SUM(CASE WHEN spk_status <> 2 THEN 1 ELSE 0 END)
-            FROM (
-                SELECT
-                    w.ID,
-                    MIN(COALESCE(det.STATUS, 0)) AS spk_status
-                FROM WO w
-                LEFT JOIN WODET det ON det.WOID  = w.ID
-                LEFT JOIN SO so     ON so.SOID   = det.SOID
-                LEFT JOIN ITEM i    ON i.ITEMNO  = det.ITEMNO
-                WHERE {where_sql}
-                GROUP BY w.ID
-            ) x
-        """, params_where)
-        status_row = cur.fetchone()
-        spk_selesai = int(status_row[0] or 0)
-        spk_berjalan = int(status_row[1] or 0)
-
-        cur.execute(f"""
-            SELECT COUNT(*)
-            FROM WO w
-            LEFT JOIN WODET det ON det.WOID  = w.ID
-            LEFT JOIN SO so     ON so.SOID   = det.SOID
-            LEFT JOIN ITEM i    ON i.ITEMNO  = det.ITEMNO
-            WHERE {where_sql}
-              AND EXISTS (
-                  SELECT 1
-                  FROM PRODRESULTDET prd
-                  JOIN PRODRESULT pr ON pr.ID = prd.PRODRESULTID
-                  WHERE prd.WODETID = det.ID
-              )
-        """, params_where)
-        item_selesai_gp = int(cur.fetchone()[0] or 0)
+        # Hapus Query Agregasi Status Besar yang Lemot
+        # Kita lewati query `spk_selesai`, `spk_berjalan`, `item_selesai_gp` yang memindai ulang WODET / PRODRESULTDET
+        spk_selesai = 0
+        spk_berjalan = 0
+        item_selesai_gp = 0
 
         # Query utama
         # Tgl Selesai: PRODRESULTDET.WODETID = WODET.ID
@@ -6514,7 +6484,7 @@ def api_spk():
                     so.PONO,
                     det.NOJOB
                 FROM WO w
-                LEFT JOIN WODET det ON det.WOID  = w.ID
+                JOIN WODET det ON det.WOID  = w.ID
                 LEFT JOIN SO so     ON so.SOID   = det.SOID
                 LEFT JOIN ITEM i    ON i.ITEMNO  = det.ITEMNO
                 WHERE {where_sql}
