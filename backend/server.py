@@ -4643,13 +4643,13 @@ def _biaya_produksi_where_clause(search="", account="", status=""):
     params = []
 
     if search:
-        keyword = f"%{search.strip()}%"
+        keyword = search.strip().lower()
         conditions.append("""
             (
-                UPPER(CAST(d.DLABORNO AS VARCHAR(255))) LIKE UPPER(?)
-                OR UPPER(CAST(d.DESCRIPTION AS VARCHAR(255))) LIKE UPPER(?)
-                OR UPPER(CAST(d.GLACCOUNT AS VARCHAR(255))) LIKE UPPER(?)
-                OR UPPER(CAST(g.ACCOUNTNAME AS VARCHAR(255))) LIKE UPPER(?)
+                LOWER(CAST(d.DLABORNO AS VARCHAR(255))) CONTAINING ?
+                OR LOWER(CAST(d.DESCRIPTION AS VARCHAR(255))) CONTAINING ?
+                OR LOWER(CAST(d.GLACCOUNT AS VARCHAR(255))) CONTAINING ?
+                OR LOWER(CAST(g.ACCOUNTNAME AS VARCHAR(255))) CONTAINING ?
             )
         """)
         params.extend([keyword, keyword, keyword, keyword])
@@ -4799,12 +4799,12 @@ def _standarisasi_harga_where_clause(search="", status="", date_from="", date_to
     params = []
 
     if search:
-        keyword = f"%{search.strip()}%"
+        keyword = search.strip().lower()
         conditions.append("""
             (
-                UPPER(CAST(s.NOSTANDARBRG AS VARCHAR(255))) LIKE UPPER(?)
-                OR UPPER(CAST(s.DEKSRIPSI AS VARCHAR(255))) LIKE UPPER(?)
-                OR UPPER(CAST(t.NAME AS VARCHAR(255))) LIKE UPPER(?)
+                LOWER(CAST(s.NOSTANDARBRG AS VARCHAR(255))) CONTAINING ?
+                OR LOWER(CAST(s.DEKSRIPSI AS VARCHAR(255))) CONTAINING ?
+                OR LOWER(CAST(t.NAME AS VARCHAR(255))) CONTAINING ?
             )
         """)
         params.extend([keyword, keyword, keyword])
