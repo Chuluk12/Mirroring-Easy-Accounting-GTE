@@ -95,6 +95,7 @@ try:
 except Exception as e:
     app.logger.warning(f"Gagal meload firebird client library di {fb_dll_path}: {e}")
 
+init_db()
 
 register_integration_api(app)
 
