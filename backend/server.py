@@ -6407,16 +6407,14 @@ def api_spk_simple():
         params_where = []
 
         if search:
+            keyword = search.lower().strip()
             conditions.append("""(
-                LOWER(w.WONO)               CONTAINING LOWER(?)
-                OR LOWER(w.DESCRIPTION)     CONTAINING LOWER(?)
-                OR LOWER(det.ITEMNO)        CONTAINING LOWER(?)
-                OR LOWER(det.JOBDESCRIPTION) CONTAINING LOWER(?)
-                OR LOWER(i.ITEMDESCRIPTION) CONTAINING LOWER(?)
-                OR LOWER(so.SONO)           CONTAINING LOWER(?)
-                OR LOWER(so.PONO)           CONTAINING LOWER(?)
+                LOWER(w.WONO)               CONTAINING ?
+                OR LOWER(w.DESCRIPTION)     CONTAINING ?
+                OR LOWER(det.ITEMNO)        CONTAINING ?
+                OR LOWER(det.JOBDESCRIPTION) CONTAINING ?
             )""")
-            params_where += [search] * 7
+            params_where += [keyword] * 4
 
         if date_from:
             conditions.append("w.WODATE >= ?")
@@ -6436,100 +6434,27 @@ def api_spk_simple():
             SELECT COUNT(*)
             FROM WO w
             JOIN WODET det ON det.WOID  = w.ID
-            LEFT JOIN SO so     ON so.SOID   = det.SOID
-            LEFT JOIN ITEM i    ON i.ITEMNO  = det.ITEMNO
             WHERE {where_sql}
         """, params_where)
         total_rows = int(cur.fetchone()[0] or 0)
 
         cur.execute(f"""
-            WITH
-            page_rows AS (
-                SELECT FIRST ? SKIP ?
-                    det.ID AS WODET_ID,
-                    w.WONO,
-                    w.WODATE,
-                    w.EXPECTEDDATE,
-                    w.DESCRIPTION,
-                    det.ITEMNO,
-                    det.JOBDESCRIPTION,
-                    det.QUANTITY,
-                    det.UNIT,
-                    det.STATUS,
-                    i.ITEMDESCRIPTION,
-                    i.TIPEPERSEDIAAN,
-                    so.SONO,
-                    so.PONO,
-                    det.NOJOB
-                FROM WO w
-                JOIN WODET det ON det.WOID  = w.ID
-                LEFT JOIN SO so     ON so.SOID   = det.SOID
-                LEFT JOIN ITEM i    ON i.ITEMNO  = det.ITEMNO
-                WHERE {where_sql}
-                ORDER BY w.WODATE DESC, w.WONO, det.NOJOB
-            ),
-            result_agg AS (
-                SELECT
-                    prd.WODETID,
-                    MAX(pr.RESULTDATE) AS TGL_SELESAI,
-                    SUM(COALESCE(prd.QUANTITY, 0)) AS TOTAL_QTY_HASIL
-                FROM PRODRESULTDET prd
-                JOIN PRODRESULT pr ON pr.ID = prd.PRODRESULTID
-                JOIN page_rows p ON p.WODET_ID = prd.WODETID
-                GROUP BY prd.WODETID
-            ),
-            mat_agg AS (
-                SELECT
-                    wdm.WODETID,
-                    SUM(wdm.QUANTITY) AS TOTAL_MAT_PLAN,
-                    SUM(COALESCE(wdm.QTYTAKEN, 0)) AS TOTAL_QTYTAKEN
-                FROM WODETMAT wdm
-                JOIN page_rows p ON p.WODET_ID = wdm.WODETID
-                GROUP BY wdm.WODETID
-            ),
-            release_by_material AS (
-                SELECT
-                    wdm.WODETID,
-                    SUM(md.QUANTITY) AS TOTAL_MAT_KELUAR
-                FROM WODETMAT wdm
-                JOIN page_rows p ON p.WODET_ID = wdm.WODETID
-                JOIN MATRLSDET md ON md.WODETID = wdm.ID
-                GROUP BY wdm.WODETID
-            ),
-            release_by_wodet AS (
-                SELECT
-                    md.WODETID,
-                    SUM(md.QUANTITY) AS TOTAL_MAT_KELUAR
-                FROM MATRLSDET md
-                JOIN page_rows p ON p.WODET_ID = md.WODETID
-                GROUP BY md.WODETID
-            )
-            SELECT
-                p.WODET_ID,
-                p.WONO,
-                p.WODATE,
-                p.EXPECTEDDATE,
-                p.DESCRIPTION,
-                p.ITEMNO,
-                p.JOBDESCRIPTION,
-                p.QUANTITY,
-                p.UNIT,
-                p.STATUS,
-                p.ITEMDESCRIPTION,
-                p.TIPEPERSEDIAAN,
-                p.SONO,
-                p.PONO,
-                ra.TGL_SELESAI,
-                ra.TOTAL_QTY_HASIL,
-                ma.TOTAL_MAT_PLAN,
-                ma.TOTAL_QTYTAKEN,
-                COALESCE(rbm.TOTAL_MAT_KELUAR, rbw.TOTAL_MAT_KELUAR, 0) AS TOTAL_MAT_KELUAR
-            FROM page_rows p
-            LEFT JOIN result_agg ra           ON ra.WODETID  = p.WODET_ID
-            LEFT JOIN mat_agg ma              ON ma.WODETID  = p.WODET_ID
-            LEFT JOIN release_by_material rbm ON rbm.WODETID = p.WODET_ID
-            LEFT JOIN release_by_wodet rbw    ON rbw.WODETID = p.WODET_ID
-            ORDER BY p.WODATE DESC, p.WONO, p.NOJOB
+            SELECT FIRST ? SKIP ?
+                det.ID AS WODET_ID,
+                w.WONO,
+                w.WODATE,
+                w.EXPECTEDDATE,
+                w.DESCRIPTION,
+                det.ITEMNO,
+                det.JOBDESCRIPTION,
+                det.QUANTITY,
+                det.UNIT,
+                det.STATUS,
+                det.NOJOB
+            FROM WO w
+            JOIN WODET det ON det.WOID  = w.ID
+            WHERE {where_sql}
+            ORDER BY w.WODATE DESC, w.WONO, det.NOJOB
         """, [limit, offset] + params_where)
 
         rows = cur.fetchall()
@@ -6537,38 +6462,18 @@ def api_spk_simple():
 
         data = []
         for r in rows:
-            qty_spk = float(r[7] or 0)
-            total_qty_hasil = float(r[15] or 0)
-            total_mat_plan = float(r[16] or 0)
-            total_qtytaken = float(r[17] or 0)
-            total_keluar   = float(r[18] or 0)
-            total_processed = max(total_qtytaken, total_keluar)
-            material_progress = round(min((total_processed / total_mat_plan) * 100, 100.0), 1) if total_mat_plan > 0 else 0.0
-            is_production_done = qty_spk <= 0 or total_qty_hasil + 0.0001 >= qty_spk
-            tgl_selesai = str(r[14]) if r[14] and is_production_done else ""
-
-            production_status = "Batal" if r[9] == 5 else ("Selesai" if is_production_done else "Proses")
-
             data.append({
                 "wodet_id": r[0],
                 "no_spk": r[1],
                 "tanggal": str(r[2]),
                 "estimasi": str(r[3]) if r[3] else "",
-                "tgl_selesai": tgl_selesai,
                 "deskripsi": str(r[4] or ""),
                 "no_barang": str(r[5] or ""),
-                "nama_barang": str(r[10] or ""),
                 "job_desc": str(r[6] or ""),
-                "qty": qty_spk,
+                "qty": float(r[7] or 0),
                 "uom": str(r[8] or ""),
                 "status_barang": r[9],
-                "tipe_persediaan": r[11],
-                "no_pesanan": str(r[12] or ""),
-                "no_po": str(r[13] or ""),
-                "total_mat_plan": total_mat_plan,
-                "total_mat_keluar": total_processed,
-                "material_progress": material_progress,
-                "production_status": production_status,
+                "no_job": str(r[10] or ""),
             })
 
         return jsonify({
@@ -6600,16 +6505,14 @@ def api_spk():
         params_where = []
 
         if search:
+            keyword = search.lower().strip()
             conditions.append("""(
-                LOWER(w.WONO)               CONTAINING LOWER(?)
-                OR LOWER(w.DESCRIPTION)     CONTAINING LOWER(?)
-                OR LOWER(det.ITEMNO)        CONTAINING LOWER(?)
-                OR LOWER(det.JOBDESCRIPTION) CONTAINING LOWER(?)
-                OR LOWER(i.ITEMDESCRIPTION) CONTAINING LOWER(?)
-                OR LOWER(so.SONO)           CONTAINING LOWER(?)
-                OR LOWER(so.PONO)           CONTAINING LOWER(?)
+                LOWER(w.WONO)               CONTAINING ?
+                OR LOWER(w.DESCRIPTION)     CONTAINING ?
+                OR LOWER(det.ITEMNO)        CONTAINING ?
+                OR LOWER(det.JOBDESCRIPTION) CONTAINING ?
             )""")
-            params_where += [search] * 7
+            params_where += [keyword] * 4
 
         if date_from:
             conditions.append("w.WODATE >= ?")
@@ -6908,16 +6811,14 @@ def api_spk_export():
         conditions = ["1=1"]
         params_where = []
         if search:
+            keyword = search.lower().strip()
             conditions.append("""(
-                LOWER(w.WONO)               CONTAINING LOWER(?)
-                OR LOWER(w.DESCRIPTION)     CONTAINING LOWER(?)
-                OR LOWER(det.ITEMNO)        CONTAINING LOWER(?)
-                OR LOWER(det.JOBDESCRIPTION) CONTAINING LOWER(?)
-                OR LOWER(i.ITEMDESCRIPTION) CONTAINING LOWER(?)
-                OR LOWER(so.SONO)           CONTAINING LOWER(?)
-                OR LOWER(so.PONO)           CONTAINING LOWER(?)
+                LOWER(w.WONO)               CONTAINING ?
+                OR LOWER(w.DESCRIPTION)     CONTAINING ?
+                OR LOWER(det.ITEMNO)        CONTAINING ?
+                OR LOWER(det.JOBDESCRIPTION) CONTAINING ?
             )""")
-            params_where += [search] * 7
+            params_where += [keyword] * 4
         if date_from:
             conditions.append("w.WODATE >= ?")
             params_where.append(date_from)
