@@ -15,6 +15,7 @@ API_PREFIX = "/api/integration/v1"
 COMMON_PARAMS = {"offset", "limit"}
 ALLOWED_PARAMS = {
     "spk": {"search", "date_from", "date_to", "status"},
+    "spk-simple": {"search", "date_from", "date_to", "status"},
     "stock": {
         "search", "itemno", "description", "description2", "quantity",
         "minimum_qty", "stock_note", "code_product", "cost_description",
@@ -317,6 +318,10 @@ def register_integration_api(app):
     @blueprint.get("/spk")
     def spk():
         return list_resource("spk", "/api/spk")
+
+    @blueprint.get("/spk-simple")
+    def spk_simple():
+        return list_resource("spk-simple", "/api/spk-simple")
 
     @blueprint.get("/stock")
     def stock():

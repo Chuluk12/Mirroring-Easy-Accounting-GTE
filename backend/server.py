@@ -6387,6 +6387,199 @@ def api_monitoring_formula():
         return jsonify({"data": [], "total": 0, "error": str(e)}), 500
 
 
+@app.route("/api/spk-simple")
+@jwt_required()
+def api_spk_simple():
+    if not check_permission("spk"):
+        return jsonify({"message": "Akses ditolak"}), 403
+    try:
+        search    = request.args.get("search", "")
+        date_from = request.args.get("date_from", "")
+        date_to   = request.args.get("date_to", "")
+        status    = request.args.get("status", "")
+        offset    = int(request.args.get("offset", 0))
+        limit     = int(request.args.get("limit", 50))
+
+        con = fdb.connect(**DB_CONFIG)
+        cur = con.cursor()
+
+        conditions   = ["1=1"]
+        params_where = []
+
+        if search:
+            conditions.append("""(
+                LOWER(w.WONO)               CONTAINING LOWER(?)
+                OR LOWER(w.DESCRIPTION)     CONTAINING LOWER(?)
+                OR LOWER(det.ITEMNO)        CONTAINING LOWER(?)
+                OR LOWER(det.JOBDESCRIPTION) CONTAINING LOWER(?)
+                OR LOWER(i.ITEMDESCRIPTION) CONTAINING LOWER(?)
+                OR LOWER(so.SONO)           CONTAINING LOWER(?)
+                OR LOWER(so.PONO)           CONTAINING LOWER(?)
+            )""")
+            params_where += [search] * 7
+
+        if date_from:
+            conditions.append("w.WODATE >= ?")
+            params_where.append(date_from)
+
+        if date_to:
+            conditions.append("w.WODATE <= ?")
+            params_where.append(date_to)
+
+        status_condition = _spk_item_status_condition(status)
+        if status_condition:
+            conditions.append(status_condition)
+
+        where_sql = " AND ".join(conditions)
+
+        cur.execute(f"""
+            SELECT COUNT(*)
+            FROM WO w
+            JOIN WODET det ON det.WOID  = w.ID
+            LEFT JOIN SO so     ON so.SOID   = det.SOID
+            LEFT JOIN ITEM i    ON i.ITEMNO  = det.ITEMNO
+            WHERE {where_sql}
+        """, params_where)
+        total_rows = int(cur.fetchone()[0] or 0)
+
+        cur.execute(f"""
+            WITH
+            page_rows AS (
+                SELECT FIRST ? SKIP ?
+                    det.ID AS WODET_ID,
+                    w.WONO,
+                    w.WODATE,
+                    w.EXPECTEDDATE,
+                    w.DESCRIPTION,
+                    det.ITEMNO,
+                    det.JOBDESCRIPTION,
+                    det.QUANTITY,
+                    det.UNIT,
+                    det.STATUS,
+                    i.ITEMDESCRIPTION,
+                    i.TIPEPERSEDIAAN,
+                    so.SONO,
+                    so.PONO,
+                    det.NOJOB
+                FROM WO w
+                JOIN WODET det ON det.WOID  = w.ID
+                LEFT JOIN SO so     ON so.SOID   = det.SOID
+                LEFT JOIN ITEM i    ON i.ITEMNO  = det.ITEMNO
+                WHERE {where_sql}
+                ORDER BY w.WODATE DESC, w.WONO, det.NOJOB
+            ),
+            result_agg AS (
+                SELECT
+                    prd.WODETID,
+                    MAX(pr.RESULTDATE) AS TGL_SELESAI,
+                    SUM(COALESCE(prd.QUANTITY, 0)) AS TOTAL_QTY_HASIL
+                FROM PRODRESULTDET prd
+                JOIN PRODRESULT pr ON pr.ID = prd.PRODRESULTID
+                JOIN page_rows p ON p.WODET_ID = prd.WODETID
+                GROUP BY prd.WODETID
+            ),
+            mat_agg AS (
+                SELECT
+                    wdm.WODETID,
+                    SUM(wdm.QUANTITY) AS TOTAL_MAT_PLAN,
+                    SUM(COALESCE(wdm.QTYTAKEN, 0)) AS TOTAL_QTYTAKEN
+                FROM WODETMAT wdm
+                JOIN page_rows p ON p.WODET_ID = wdm.WODETID
+                GROUP BY wdm.WODETID
+            ),
+            release_by_material AS (
+                SELECT
+                    wdm.WODETID,
+                    SUM(md.QUANTITY) AS TOTAL_MAT_KELUAR
+                FROM WODETMAT wdm
+                JOIN page_rows p ON p.WODET_ID = wdm.WODETID
+                JOIN MATRLSDET md ON md.WODETID = wdm.ID
+                GROUP BY wdm.WODETID
+            ),
+            release_by_wodet AS (
+                SELECT
+                    md.WODETID,
+                    SUM(md.QUANTITY) AS TOTAL_MAT_KELUAR
+                FROM MATRLSDET md
+                JOIN page_rows p ON p.WODET_ID = md.WODETID
+                GROUP BY md.WODETID
+            )
+            SELECT
+                p.WODET_ID,
+                p.WONO,
+                p.WODATE,
+                p.EXPECTEDDATE,
+                p.DESCRIPTION,
+                p.ITEMNO,
+                p.JOBDESCRIPTION,
+                p.QUANTITY,
+                p.UNIT,
+                p.STATUS,
+                p.ITEMDESCRIPTION,
+                p.TIPEPERSEDIAAN,
+                p.SONO,
+                p.PONO,
+                ra.TGL_SELESAI,
+                ra.TOTAL_QTY_HASIL,
+                ma.TOTAL_MAT_PLAN,
+                ma.TOTAL_QTYTAKEN,
+                COALESCE(rbm.TOTAL_MAT_KELUAR, rbw.TOTAL_MAT_KELUAR, 0) AS TOTAL_MAT_KELUAR
+            FROM page_rows p
+            LEFT JOIN result_agg ra           ON ra.WODETID  = p.WODET_ID
+            LEFT JOIN mat_agg ma              ON ma.WODETID  = p.WODET_ID
+            LEFT JOIN release_by_material rbm ON rbm.WODETID = p.WODET_ID
+            LEFT JOIN release_by_wodet rbw    ON rbw.WODETID = p.WODET_ID
+            ORDER BY p.WODATE DESC, p.WONO, p.NOJOB
+        """, [limit, offset] + params_where)
+
+        rows = cur.fetchall()
+        con.close()
+
+        data = []
+        for r in rows:
+            qty_spk = float(r[7] or 0)
+            total_qty_hasil = float(r[15] or 0)
+            total_mat_plan = float(r[16] or 0)
+            total_qtytaken = float(r[17] or 0)
+            total_keluar   = float(r[18] or 0)
+            total_processed = max(total_qtytaken, total_keluar)
+            material_progress = round(min((total_processed / total_mat_plan) * 100, 100.0), 1) if total_mat_plan > 0 else 0.0
+            is_production_done = qty_spk <= 0 or total_qty_hasil + 0.0001 >= qty_spk
+            tgl_selesai = str(r[14]) if r[14] and is_production_done else ""
+
+            production_status = "Batal" if r[9] == 5 else ("Selesai" if is_production_done else "Proses")
+
+            data.append({
+                "wodet_id": r[0],
+                "no_spk": r[1],
+                "tanggal": str(r[2]),
+                "estimasi": str(r[3]) if r[3] else "",
+                "tgl_selesai": tgl_selesai,
+                "deskripsi": str(r[4] or ""),
+                "no_barang": str(r[5] or ""),
+                "nama_barang": str(r[10] or ""),
+                "job_desc": str(r[6] or ""),
+                "qty": qty_spk,
+                "uom": str(r[8] or ""),
+                "status_barang": r[9],
+                "tipe_persediaan": r[11],
+                "no_pesanan": str(r[12] or ""),
+                "no_po": str(r[13] or ""),
+                "total_mat_plan": total_mat_plan,
+                "total_mat_keluar": total_processed,
+                "material_progress": material_progress,
+                "production_status": production_status,
+            })
+
+        return jsonify({
+            "data": filter_record_columns("spk", data),
+            "total": total_rows,
+        })
+    except Exception as e:
+        print(f"Error api_spk_simple: {e}")
+        return jsonify({"message": str(e)}), 500
+
+
 @app.route("/api/spk")
 @jwt_required()
 def api_spk():
