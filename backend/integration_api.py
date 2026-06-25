@@ -329,14 +329,14 @@ def register_integration_api(app):
         status_code, upstream = _internal_get(
             app,
             "/api/monitoring-formula",
-            [("search", no_spk), ("offset", 0), ("limit", 1), ("skip_count", 1)]
+            [("search", no_spk), ("offset", 0), ("limit", 500)]
         )
         if status_code >= 400 or upstream.get("error"):
             return _error_response("spk_detail", status_code, upstream)
             
         # Ensure exact match on SPK Number since 'search' uses LIKE / CONTAINING
         rows = upstream.get("data", [])
-        data = next((r for r in rows if str(r.get("no_spk", "")).strip() == no_spk.strip()), None)
+        data = [r for r in rows if str(r.get("no_spk", "")).strip() == no_spk.strip()]
         
         if not data:
             return jsonify({
@@ -354,7 +354,10 @@ def register_integration_api(app):
             "api_version": "v1",
             "resource": "spk_detail",
             "generated_at": datetime.now().astimezone().isoformat(),
-            "data": data
+            "data": data,
+            "meta": {
+                "count": len(data)
+            }
         })
 
     @blueprint.get("/spk-simple")
