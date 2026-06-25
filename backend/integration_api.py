@@ -16,7 +16,7 @@ COMMON_PARAMS = {"offset", "limit"}
 ALLOWED_PARAMS = {
     "spk": {"search", "date_from", "date_to", "status"},
     "spk-simple": {"search", "date_from", "date_to", "status"},
-    "monitoring-formula": {"wodet_id", "qty_only", "skip_count", "no_spk"},
+    "monitoring-formula": {"wodet_id", "qty_only", "skip_count"},
     "stock": {
         "search", "itemno", "description", "description2", "quantity",
         "minimum_qty", "stock_note", "code_product", "cost_description",
@@ -331,8 +331,7 @@ def register_integration_api(app):
 
         # Always inject search, skip_count=1, limit=500
         # skip_count=1 disables count aggregation
-        # Use no_spk directly instead of search to avoid slow LIKE queries
-        params = [("no_spk", no_spk), ("offset", 0), ("limit", 500), ("skip_count", "1")]
+        params = [("search", no_spk), ("offset", 0), ("limit", 500), ("skip_count", "1")]
         
         # If specific columns requested and we don't need heavy computations
         if requested_cols:
