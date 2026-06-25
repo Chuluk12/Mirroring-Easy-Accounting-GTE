@@ -329,7 +329,7 @@ def register_integration_api(app):
         status_code, upstream = _internal_get(
             app,
             "/api/monitoring-formula",
-            [("wodet_id", wodet_id)]
+            [("wodet_id", wodet_id), ("offset", 0), ("limit", 1), ("skip_count", 1)]
         )
         if status_code >= 400 or upstream.get("error"):
             return _error_response("spk_detail", status_code, upstream)
