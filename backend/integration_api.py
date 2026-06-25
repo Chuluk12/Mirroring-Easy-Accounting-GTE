@@ -320,8 +320,8 @@ def register_integration_api(app):
     def spk():
         return list_resource("spk", "/api/spk")
 
-    @blueprint.get("/spk/detail/<int:wodet_id>")
-    def spk_detail(wodet_id):
+    @blueprint.get("/spk/detail/<path:no_spk>")
+    def spk_detail(no_spk):
         auth_error = _auth_error()
         if auth_error:
             return auth_error
@@ -329,13 +329,26 @@ def register_integration_api(app):
         status_code, upstream = _internal_get(
             app,
             "/api/monitoring-formula",
-            [("wodet_id", wodet_id), ("offset", 0), ("limit", 1), ("skip_count", 1)]
+            [("search", no_spk), ("offset", 0), ("limit", 1), ("skip_count", 1)]
         )
         if status_code >= 400 or upstream.get("error"):
             return _error_response("spk_detail", status_code, upstream)
             
+        # Ensure exact match on SPK Number since 'search' uses LIKE / CONTAINING
         rows = upstream.get("data", [])
-        data = rows[0] if rows else {}
+        data = next((r for r in rows if str(r.get("no_spk", "")).strip() == no_spk.strip()), None)
+        
+        if not data:
+            return jsonify({
+                "success": False,
+                "api_version": "v1",
+                "resource": "spk_detail",
+                "error": {
+                    "code": "not_found",
+                    "message": "Data tidak ditemukan"
+                }
+            }), 404
+
         return jsonify({
             "success": True,
             "api_version": "v1",
