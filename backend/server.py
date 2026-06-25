@@ -5044,9 +5044,13 @@ def api_standarisasi_harga_details(standar_id):
         return jsonify({"data": [], "total": 0, "error": str(e)}), 500
 
 
-def _monitoring_formula_where_clause(search="", date_from="", date_to="", wodet_id=""):
+def _monitoring_formula_where_clause(search="", date_from="", date_to="", wodet_id="", no_spk=""):
     conditions = ["1=1"]
     params = []
+
+    if no_spk:
+        conditions.append("w.WONO = ?")
+        params.append(no_spk)
 
     if search:
         conditions.append("""(
@@ -5955,7 +5959,7 @@ def api_monitoring_formula():
 
         con = fdb.connect(**DB_CONFIG)
         cur = con.cursor()
-        where_sql, params_where = _monitoring_formula_where_clause(search, date_from, date_to, wodet_id_filter)
+        where_sql, params_where = _monitoring_formula_where_clause(search, date_from, date_to, wodet_id_filter, no_spk_filter)
         wodet_columns = set(_get_table_columns(cur, "WODET"))
         def _truthy_sql_expr(alias, column):
             return f"UPPER(TRIM(CAST({alias}.{column} AS VARCHAR(20)))) NOT IN ('', '0', 'N', 'NO', 'F', 'FALSE')"
@@ -8169,7 +8173,8 @@ def api_hpp_details():
     if not check_permission("akuntansi"):
         return jsonify({"message": "Akses ditolak"}), 403
     try:
-        item_no = request.args.get("itemno", "")
+        search = request.args.get("search", "")
+        no_spk_filter = request.args.get("no_spk", "").strip()
         date_from = request.args.get("date_from", "")
         date_to = request.args.get("date_to", "")
         if not item_no:
