@@ -329,7 +329,9 @@ def register_integration_api(app):
         columns_param = request.args.get("column", "").strip()
         requested_cols = {c.strip() for c in columns_param.split(",") if c.strip()} if columns_param else None
 
-        params = [("search", no_spk), ("offset", 0), ("limit", 500)]
+        # Always inject search, skip_count=1, limit=500
+        # skip_count=1 disables count aggregation
+        params = [("search", no_spk), ("offset", 0), ("limit", 500), ("skip_count", "1")]
         
         # If specific columns requested and we don't need heavy computations
         if requested_cols:
