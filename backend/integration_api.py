@@ -16,6 +16,7 @@ COMMON_PARAMS = {"offset", "limit"}
 ALLOWED_PARAMS = {
     "spk": {"search", "date_from", "date_to", "status"},
     "spk-simple": {"search", "date_from", "date_to", "status"},
+    "monitoring-formula": {"wodet_id", "qty_only", "skip_count"},
     "stock": {
         "search", "itemno", "description", "description2", "quantity",
         "minimum_qty", "stock_note", "code_product", "cost_description",
@@ -319,9 +320,37 @@ def register_integration_api(app):
     def spk():
         return list_resource("spk", "/api/spk")
 
+    @blueprint.get("/spk/detail/<int:wodet_id>")
+    def spk_detail(wodet_id):
+        auth_error = _auth_error()
+        if auth_error:
+            return auth_error
+            
+        status_code, upstream = _internal_get(
+            app,
+            "/api/monitoring-formula",
+            [("wodet_id", wodet_id)]
+        )
+        if status_code >= 400 or upstream.get("error"):
+            return _error_response("spk_detail", status_code, upstream)
+            
+        rows = upstream.get("data", [])
+        data = rows[0] if rows else {}
+        return jsonify({
+            "success": True,
+            "api_version": "v1",
+            "resource": "spk_detail",
+            "generated_at": datetime.now().astimezone().isoformat(),
+            "data": data
+        })
+
     @blueprint.get("/spk-simple")
     def spk_simple():
         return list_resource("spk-simple", "/api/spk-simple")
+
+    @blueprint.get("/monitoring-formula")
+    def monitoring_formula():
+        return list_resource("monitoring-formula", "/api/monitoring-formula")
 
     @blueprint.get("/stock")
     def stock():
