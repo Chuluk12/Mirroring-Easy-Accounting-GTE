@@ -325,11 +325,28 @@ def register_integration_api(app):
         auth_error = _auth_error()
         if auth_error:
             return auth_error
+
+        columns_param = request.args.get("column", "").strip()
+        requested_cols = {c.strip() for c in columns_param.split(",") if c.strip()} if columns_param else None
+
+        params = [("search", no_spk), ("offset", 0), ("limit", 500)]
+        
+        # If specific columns requested and we don't need heavy computations
+        if requested_cols:
+            heavy_keys = {
+                "materials", "production_details", "wip_reconciliation",
+                "formula_material_cost", "formula_production_cost", "formula_total_cost",
+                "spk_material_cost", "spk_production_cost", "spk_total_cost",
+                "hpp_total_actual", "hpp_per_unit", "hpp_per_unit_spk",
+                "material_cost_diff", "production_cost_diff", "total_cost_diff"
+            }
+            if not requested_cols.intersection(heavy_keys):
+                params.append(("qty_only", "1"))
             
         status_code, upstream = _internal_get(
             app,
             "/api/monitoring-formula",
-            [("search", no_spk), ("offset", 0), ("limit", 500)]
+            params
         )
         if status_code >= 400 or upstream.get("error"):
             return _error_response("spk_detail", status_code, upstream)
