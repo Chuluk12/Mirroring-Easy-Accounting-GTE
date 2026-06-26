@@ -11,24 +11,34 @@ jobs:
 
     steps:
       - name: Connect to NetBird
-        uses: Alemiz112/netbird-connect@v1.0.1
-        with:
-          setup-key: ${{ secrets.NETBIRD_SETUP_KEY }}
-          hostname: github-actions-deploy
-          management-url: https://api.netbird.io:443
-
-      - name: Test NetBird connection
         run: |
-          ping -c 3 ${{ secrets.SERVER_HOST }}
+          curl -fsSL https://pkgs.netbird.io/install.sh | sh
+          sudo netbird up \
+            --setup-key "${{ secrets.NETBIRD_SETUP_KEY }}" \
+            --hostname "github-actions-deploy" \
+            --management-url "https://api.netbird.io:443"
+
+      - name: Wait NetBird
+        run: |
+          sleep 15
+          netbird status
+          ping -c 5 ${{ secrets.SERVER_HOST }} || true
 
       - name: Deploy via SSH
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.SERVER_HOST }}
-          username: ${{ secrets.SERVER_USERNAME }}
-          key: ${{ secrets.SERVER_SSH_KEY }}
-          port: ${{ secrets.SERVER_PORT }}
-          script: |
-            cd /path/to/your/project/Mirroring-Easy-Accounting-GTE
-            git pull origin main
-            docker compose up -d --build
+        run: |
+          mkdir -p ~/.ssh
+
+          cat > ~/.ssh/id_ed25519 << 'EOF'
+          ${{ secrets.SERVER_SSH_KEY }}
+          EOF
+
+          chmod 600 ~/.ssh/id_ed25519
+
+          ssh-keyscan -H ${{ secrets.SERVER_HOST }} >> ~/.ssh/known_hosts
+
+          ssh -i ~/.ssh/id_ed25519 \
+            ${{ secrets.SERVER_USERNAME }}@${{ secrets.SERVER_HOST }} << 'EOF'
+              cd ~/repositories/Mirroring-Easy-Accounting-GTE
+              git pull origin main
+              docker compose up -d --build
+          EOF
