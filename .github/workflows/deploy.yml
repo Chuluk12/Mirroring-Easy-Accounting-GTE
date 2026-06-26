@@ -25,21 +25,16 @@ jobs:
           netbird status
           ping -c 3 ${{ secrets.SERVER_HOST }} || true
 
-      - name: Setup SSH
-        run: |
-          mkdir -p ~/.ssh
-
-          printf "%s" "${{ secrets.SERVER_SSH_KEY }}" > ~/.ssh/id_ed25519
-          chmod 600 ~/.ssh/id_ed25519
-
-          ssh-keyscan -H ${{ secrets.SERVER_HOST }} >> ~/.ssh/known_hosts
-
-      - name: Deploy
-        run: |
-          ssh \
-            -i ~/.ssh/id_ed25519 \
-            ${{ secrets.SERVER_USERNAME }}@${{ secrets.SERVER_HOST }} <<'EOF'
-              cd ~/repositories/Mirroring-Easy-Accounting-GTE
-              git pull origin main
-              docker compose up -d --build
-          EOF
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USERNAME }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          port: ${{ secrets.SERVER_PORT }}
+          timeout: 60s
+          command_timeout: 25m
+          script: |
+            cd ~/repositories/Mirroring-Easy-Accounting-GTE
+            git pull origin main
+            docker compose up -d --build
