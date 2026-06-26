@@ -15,6 +15,7 @@ jobs:
         with:
           setup-key: ${{ secrets.NETBIRD_SETUP_KEY }}
           hostname: github-actions-deploy
+          management-url: https://api.netbird.io:443
 
       - name: Test NetBird connection
         run: |
