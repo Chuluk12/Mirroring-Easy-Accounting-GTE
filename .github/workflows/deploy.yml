@@ -8,7 +8,18 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+
     steps:
+      - name: Connect to NetBird
+        uses: Alemiz112/netbird-connect@v1.0.1
+        with:
+          setup-key: ${{ secrets.NETBIRD_SETUP_KEY }}
+          hostname: github-actions-deploy
+
+      - name: Test NetBird connection
+        run: |
+          ping -c 3 ${{ secrets.SERVER_HOST }}
+
       - name: Deploy via SSH
         uses: appleboy/ssh-action@v1.0.3
         with:
@@ -19,4 +30,4 @@ jobs:
           script: |
             cd /path/to/your/project/Mirroring-Easy-Accounting-GTE
             git pull origin main
-            docker-compose up -d --build
+            docker compose up -d --build
