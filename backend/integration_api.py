@@ -17,7 +17,7 @@ ALLOWED_PARAMS = {
     "spk": {"search", "date_from", "date_to", "status"},
     "spk-simple": {"search", "date_from", "date_to", "status"},
     "monitoring-formula": {"wodet_id", "qty_only", "skip_count", "no_spk"},
-    "standarisasi-material": set(),
+    "standarisasi-material": {"search", "limit", "offset"},
     "stock": {
         "search", "itemno", "description", "description2", "quantity",
         "minimum_qty", "stock_note", "code_product", "cost_description",
