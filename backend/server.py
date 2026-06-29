@@ -4957,17 +4957,17 @@ def api_integration_standarisasi_material():
             LatestStandard AS (
                 SELECT * FROM RankedStandards WHERE rn = 1
             )
-                SELECT COUNT(DISTINCT i.ITEMNO)
-                FROM ITEM i
-                JOIN ITEMCATEGORY c ON c.CATEGORYID = i.CATEGORYID
-                JOIN LatestStandard curr ON curr.ITEMNO = i.ITEMNO
-                WHERE (UPPER(c.NAME) CONTAINING 'BAHAN BAKU' 
-                   OR UPPER(c.NAME) CONTAINING 'BAHAN PEMBANTU'
-                   OR UPPER(c.NAME) CONTAINING 'RAW MATERIAL'
-                   OR UPPER(c.NAME) CONTAINING 'BAHAN')
-                   {where_clause}
-            """
-            cur.execute(count_sql, params)
+            SELECT COUNT(DISTINCT i.ITEMNO)
+            FROM ITEM i
+            JOIN ITEMCATEGORY c ON c.CATEGORYID = i.CATEGORYID
+            JOIN LatestStandard curr ON curr.ITEMNO = i.ITEMNO
+            WHERE (UPPER(c.NAME) CONTAINING 'BAHAN BAKU' 
+               OR UPPER(c.NAME) CONTAINING 'BAHAN PEMBANTU'
+               OR UPPER(c.NAME) CONTAINING 'RAW MATERIAL'
+               OR UPPER(c.NAME) CONTAINING 'BAHAN')
+               {where_clause}
+        """
+        cur.execute(count_sql, params)
         total = int(cur.fetchone()[0] or 0)
         
         con.close()
