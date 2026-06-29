@@ -6577,42 +6577,6 @@ def api_spk_simple():
                 LEFT JOIN ITEM i    ON i.ITEMNO  = det.ITEMNO
                 WHERE {where_sql}
                 ORDER BY w.WODATE DESC, w.WONO, det.NOJOB
-            ),
-            result_agg AS (
-                SELECT
-                    prd.WODETID,
-                    MAX(pr.RESULTDATE) AS TGL_SELESAI,
-                    SUM(COALESCE(prd.QUANTITY, 0)) AS TOTAL_QTY_HASIL
-                FROM PRODRESULTDET prd
-                JOIN PRODRESULT pr ON pr.ID = prd.PRODRESULTID
-                JOIN page_rows p ON p.WODET_ID = prd.WODETID
-                GROUP BY prd.WODETID
-            ),
-            mat_agg AS (
-                SELECT
-                    wdm.WODETID,
-                    SUM(wdm.QUANTITY) AS TOTAL_MAT_PLAN,
-                    SUM(COALESCE(wdm.QTYTAKEN, 0)) AS TOTAL_QTYTAKEN
-                FROM WODETMAT wdm
-                JOIN page_rows p ON p.WODET_ID = wdm.WODETID
-                GROUP BY wdm.WODETID
-            ),
-            release_by_material AS (
-                SELECT
-                    wdm.WODETID,
-                    SUM(md.QUANTITY) AS TOTAL_MAT_KELUAR
-                FROM WODETMAT wdm
-                JOIN page_rows p ON p.WODET_ID = wdm.WODETID
-                JOIN MATRLSDET md ON md.WODETID = wdm.ID
-                GROUP BY wdm.WODETID
-            ),
-            release_by_wodet AS (
-                SELECT
-                    md.WODETID,
-                    SUM(md.QUANTITY) AS TOTAL_MAT_KELUAR
-                FROM MATRLSDET md
-                JOIN page_rows p ON p.WODET_ID = md.WODETID
-                GROUP BY md.WODETID
             )
             SELECT
                 p.WODET_ID,
@@ -6629,17 +6593,17 @@ def api_spk_simple():
                 p.TIPEPERSEDIAAN,
                 p.SONO,
                 p.PONO,
-                ra.TGL_SELESAI,
-                ra.TOTAL_QTY_HASIL,
-                ma.TOTAL_MAT_PLAN,
-                ma.TOTAL_QTYTAKEN,
-                COALESCE(rbm.TOTAL_MAT_KELUAR, rbw.TOTAL_MAT_KELUAR, 0) AS TOTAL_MAT_KELUAR
+                p.NOJOB,
+                (SELECT MAX(pr.RESULTDATE) FROM PRODRESULTDET prd JOIN PRODRESULT pr ON pr.ID = prd.PRODRESULTID WHERE prd.WODETID = p.WODET_ID) AS TGL_SELESAI,
+                (SELECT SUM(COALESCE(prd.QUANTITY, 0)) FROM PRODRESULTDET prd WHERE prd.WODETID = p.WODET_ID) AS TOTAL_QTY_HASIL,
+                (SELECT SUM(wdm.QUANTITY) FROM WODETMAT wdm WHERE wdm.WODETID = p.WODET_ID) AS TOTAL_MAT_PLAN,
+                (SELECT SUM(COALESCE(wdm.QTYTAKEN, 0)) FROM WODETMAT wdm WHERE wdm.WODETID = p.WODET_ID) AS TOTAL_QTYTAKEN,
+                COALESCE(
+                    (SELECT SUM(md.QUANTITY) FROM MATRLSDET md JOIN WODETMAT wdm ON wdm.ID = md.WODETID WHERE wdm.WODETID = p.WODET_ID),
+                    (SELECT SUM(md.QUANTITY) FROM MATRLSDET md WHERE md.WODETID = p.WODET_ID),
+                    0
+                ) AS TOTAL_MAT_KELUAR
             FROM page_rows p
-            LEFT JOIN result_agg ra           ON ra.WODETID  = p.WODET_ID
-            LEFT JOIN mat_agg ma              ON ma.WODETID  = p.WODET_ID
-            LEFT JOIN release_by_material rbm ON rbm.WODETID = p.WODET_ID
-            LEFT JOIN release_by_wodet rbw    ON rbw.WODETID = p.WODET_ID
-            ORDER BY p.WODATE DESC, p.WONO, p.NOJOB
         """, [limit, offset] + params_where)
 
         rows = cur.fetchall()
@@ -6648,14 +6612,14 @@ def api_spk_simple():
         data = []
         for r in rows:
             qty_spk = float(r[7] or 0)
-            total_qty_hasil = float(r[15] or 0)
-            total_mat_plan = float(r[16] or 0)
-            total_qtytaken = float(r[17] or 0)
-            total_keluar   = float(r[18] or 0)
+            total_qty_hasil = float(r[16] or 0)
+            total_mat_plan = float(r[17] or 0)
+            total_qtytaken = float(r[18] or 0)
+            total_keluar   = float(r[19] or 0)
             total_processed = max(total_qtytaken, total_keluar)
             material_progress = round(min((total_processed / total_mat_plan) * 100, 100.0), 1) if total_mat_plan > 0 else 0.0
             is_production_done = qty_spk <= 0 or total_qty_hasil + 0.0001 >= qty_spk
-            tgl_selesai = str(r[14]) if r[14] and is_production_done else ""
+            tgl_selesai = str(r[15]) if r[15] and is_production_done else ""
 
             production_status = "Batal" if r[9] == 5 else ("Selesai" if is_production_done else "Proses")
 
