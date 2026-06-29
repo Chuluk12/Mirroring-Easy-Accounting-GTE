@@ -17,6 +17,7 @@ ALLOWED_PARAMS = {
     "spk": {"search", "date_from", "date_to", "status"},
     "spk-simple": {"search", "date_from", "date_to", "status"},
     "monitoring-formula": {"wodet_id", "qty_only", "skip_count", "no_spk"},
+    "standarisasi-material": set(),
     "stock": {
         "search", "itemno", "description", "description2", "quantity",
         "minimum_qty", "stock_note", "code_product", "cost_description",
@@ -453,5 +454,9 @@ def register_integration_api(app):
                 "total": int(upstream.get("total", len(rows)) or 0),
             },
         })
+
+    @blueprint.get("/standarisasi-material")
+    def standarisasi_material():
+        return list_resource("standarisasi-material", "/api/integration/v1/standarisasi-material")
 
     app.register_blueprint(blueprint, url_prefix=API_PREFIX)
