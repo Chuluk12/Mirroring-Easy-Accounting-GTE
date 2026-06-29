@@ -4869,8 +4869,9 @@ def _build_standarisasi_harga_rows(rows):
 @app.route("/api/integration/v1/standarisasi-material")
 @jwt_required()
 def api_integration_standarisasi_material():
-    # Using raw integration endpoint internally mapped for this specific requested format
-    if not check_permission("spk_standarisasi_harga"):
+    # Allow admin role from internal_get token or explicit permission
+    user = get_current_user()
+    if user.get("role") != "admin" and not check_permission("spk_standarisasi_harga"):
         return jsonify({"message": "Akses ditolak"}), 403
     try:
         offset = max(int(request.args.get("offset", 0)), 0)
