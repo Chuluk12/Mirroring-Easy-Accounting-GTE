@@ -4874,9 +4874,12 @@ def api_integration_standarisasi_material():
     # based on the role name, which might be missing in sqlite if not setup correctly.
     # We will rely on JWT claims directly to authorize the integration client.
     claims = get_jwt()
-    is_integration = claims.get("identity") == "integration-calculator" or claims.get("sub") == "integration-calculator"
-    if not is_integration and claims.get("role") != "admin" and not check_permission("spk_standarisasi_harga"):
-        return jsonify({"message": "Akses ditolak"}), 403
+    # Accept identity "integration-calculator" or role "admin" without sqlite permission check
+    is_integration = claims.get("sub") == "integration-calculator" or claims.get("identity") == "integration-calculator" or get_jwt_identity() == "integration-calculator"
+    is_admin = claims.get("role") == "admin"
+    if not is_integration and not is_admin:
+        if not check_permission("spk_standarisasi_harga"):
+            return jsonify({"message": "Akses ditolak"}), 403
     try:
         offset = max(int(request.args.get("offset", 0)), 0)
         limit = min(max(int(request.args.get("limit", 100)), 1), 500)
@@ -6622,7 +6625,7 @@ def api_spk_simple():
             tgl_selesai = str(r[15]) if r[15] and is_production_done else ""
 
             production_status = "Batal" if r[9] == 5 else ("Selesai" if is_production_done else "Proses")
-
+    
             data.append({
                 "wodet_id": r[0],
                 "no_spk": r[1],
