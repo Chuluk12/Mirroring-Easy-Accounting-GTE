@@ -4894,7 +4894,6 @@ def api_integration_standarisasi_material():
                     d.ITEMNO,
                     s.NOSTANDARBRG,
                     s.TGLMULAIBRG,
-                    d.OLDCOST,
                     d.NEWCOST,
                     ROW_NUMBER() OVER (PARTITION BY d.ITEMNO ORDER BY s.TGLMULAIBRG DESC, s.IDSTANDARBRG DESC) as rn
                 FROM STANDARBIAYABRGDET d
@@ -4913,8 +4912,7 @@ def api_integration_standarisasi_material():
                 c.NAME AS JENIS_PERSEDIAAN,
                 COALESCE(prev.NEWCOST, 0) AS HARGA_LAMA,
                 COALESCE(curr.NEWCOST, 0) AS HARGA_BARU,
-                curr.NOSTANDARBRG AS NO_STB,
-                COALESCE(curr.OLDCOST, 0) AS HARGA_AWAL
+                curr.NOSTANDARBRG AS NO_STB
             FROM ITEM i
             JOIN ITEMCATEGORY c ON c.CATEGORYID = i.CATEGORYID
             JOIN LatestStandard curr ON curr.ITEMNO = i.ITEMNO
@@ -4954,7 +4952,7 @@ def api_integration_standarisasi_material():
                 "harga_standarisasi_terakhir": float(row[3] or 0),
                 "harga_standarisasi_baru": float(row[4] or 0),
                 "no_stb": str(row[5] or "").strip(),
-                "harga_standarisasi_awal": float(row[6] or 0),
+                "harga_standarisasi_awal": float(row[3] or 0),
             })
 
         return jsonify({
