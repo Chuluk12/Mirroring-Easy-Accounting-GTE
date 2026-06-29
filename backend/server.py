@@ -5146,15 +5146,19 @@ def _monitoring_formula_where_clause(search="", date_from="", date_to="", wodet_
         params.append(no_spk)
 
     if search:
-        conditions.append("""(
-            LOWER(w.WONO) CONTAINING LOWER(?)
-            OR LOWER(det.ITEMNO) CONTAINING LOWER(?)
-            OR LOWER(det.JOBDESCRIPTION) CONTAINING LOWER(?)
-            OR LOWER(i.ITEMDESCRIPTION) CONTAINING LOWER(?)
-            OR LOWER(so.SONO) CONTAINING LOWER(?)
-            OR LOWER(so.PONO) CONTAINING LOWER(?)
-        )""")
-        params += [search] * 6
+        if search.upper().startswith("GTE-SPK-"):
+            conditions.append("w.WONO = ?")
+            params.append(search.strip())
+        else:
+            conditions.append("""(
+                LOWER(w.WONO) CONTAINING LOWER(?)
+                OR LOWER(det.ITEMNO) CONTAINING LOWER(?)
+                OR LOWER(det.JOBDESCRIPTION) CONTAINING LOWER(?)
+                OR LOWER(i.ITEMDESCRIPTION) CONTAINING LOWER(?)
+                OR LOWER(so.SONO) CONTAINING LOWER(?)
+                OR LOWER(so.PONO) CONTAINING LOWER(?)
+            )""")
+            params += [search] * 6
 
     if date_from:
         conditions.append("w.WODATE >= ?")
@@ -6512,14 +6516,19 @@ def api_spk_simple():
         params_where = []
 
         if search:
-            keyword = search.lower().strip()
-            conditions.append("""(
-                LOWER(w.WONO)               CONTAINING ?
-                OR LOWER(w.DESCRIPTION)     CONTAINING ?
-                OR LOWER(det.ITEMNO)        CONTAINING ?
-                OR LOWER(det.JOBDESCRIPTION) CONTAINING ?
-            )""")
-            params_where += [keyword] * 4
+            # We don't use CONTAINING for exact match SPK lookups since it scans the whole DB
+            if search.upper().startswith("GTE-SPK-"):
+                conditions.append("w.WONO = ?")
+                params_where.append(search.strip())
+            else:
+                keyword = search.lower().strip()
+                conditions.append("""(
+                    LOWER(w.WONO)               CONTAINING ?
+                    OR LOWER(w.DESCRIPTION)     CONTAINING ?
+                    OR LOWER(det.ITEMNO)        CONTAINING ?
+                    OR LOWER(det.JOBDESCRIPTION) CONTAINING ?
+                )""")
+                params_where += [keyword] * 4
 
         if date_from:
             conditions.append("w.WODATE >= ?")
@@ -6536,11 +6545,9 @@ def api_spk_simple():
         where_sql = " AND ".join(conditions)
 
         cur.execute(f"""
-            SELECT COUNT(*)
+            SELECT COUNT(det.ID)
             FROM WO w
             JOIN WODET det ON det.WOID  = w.ID
-            LEFT JOIN SO so     ON so.SOID   = det.SOID
-            LEFT JOIN ITEM i    ON i.ITEMNO  = det.ITEMNO
             WHERE {where_sql}
         """, params_where)
         total_rows = int(cur.fetchone()[0] or 0)
@@ -6704,14 +6711,19 @@ def api_spk():
         params_where = []
 
         if search:
-            keyword = search.lower().strip()
-            conditions.append("""(
-                LOWER(w.WONO)               CONTAINING ?
-                OR LOWER(w.DESCRIPTION)     CONTAINING ?
-                OR LOWER(det.ITEMNO)        CONTAINING ?
-                OR LOWER(det.JOBDESCRIPTION) CONTAINING ?
-            )""")
-            params_where += [keyword] * 4
+            # We don't use CONTAINING for exact match SPK lookups since it scans the whole DB
+            if search.upper().startswith("GTE-SPK-"):
+                conditions.append("w.WONO = ?")
+                params_where.append(search.strip())
+            else:
+                keyword = search.lower().strip()
+                conditions.append("""(
+                    LOWER(w.WONO)               CONTAINING ?
+                    OR LOWER(w.DESCRIPTION)     CONTAINING ?
+                    OR LOWER(det.ITEMNO)        CONTAINING ?
+                    OR LOWER(det.JOBDESCRIPTION) CONTAINING ?
+                )""")
+                params_where += [keyword] * 4
 
         if date_from:
             conditions.append("w.WODATE >= ?")
@@ -7010,14 +7022,19 @@ def api_spk_export():
         conditions = ["1=1"]
         params_where = []
         if search:
-            keyword = search.lower().strip()
-            conditions.append("""(
-                LOWER(w.WONO)               CONTAINING ?
-                OR LOWER(w.DESCRIPTION)     CONTAINING ?
-                OR LOWER(det.ITEMNO)        CONTAINING ?
-                OR LOWER(det.JOBDESCRIPTION) CONTAINING ?
-            )""")
-            params_where += [keyword] * 4
+            # We don't use CONTAINING for exact match SPK lookups since it scans the whole DB
+            if search.upper().startswith("GTE-SPK-"):
+                conditions.append("w.WONO = ?")
+                params_where.append(search.strip())
+            else:
+                keyword = search.lower().strip()
+                conditions.append("""(
+                    LOWER(w.WONO)               CONTAINING ?
+                    OR LOWER(w.DESCRIPTION)     CONTAINING ?
+                    OR LOWER(det.ITEMNO)        CONTAINING ?
+                    OR LOWER(det.JOBDESCRIPTION) CONTAINING ?
+                )""")
+                params_where += [keyword] * 4
         if date_from:
             conditions.append("w.WODATE >= ?")
             params_where.append(date_from)
