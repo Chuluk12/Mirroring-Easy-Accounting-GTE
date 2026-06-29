@@ -4869,9 +4869,12 @@ def _build_standarisasi_harga_rows(rows):
 @app.route("/api/integration/v1/standarisasi-material")
 @jwt_required()
 def api_integration_standarisasi_material():
-    # Allow admin role from internal_get token or explicit permission
-    user = get_current_user()
-    if user.get("role") != "admin" and not check_permission("spk_standarisasi_harga"):
+    # Bypass explicit role checks here because the integration token 
+    # provides an 'admin' role, but get_current_user dynamically re-fetches permissions
+    # based on the role name, which might be missing in sqlite if not setup correctly.
+    # We will rely on JWT claims directly to authorize the integration client.
+    claims = get_jwt()
+    if claims.get("role") != "admin" and not check_permission("spk_standarisasi_harga"):
         return jsonify({"message": "Akses ditolak"}), 403
     try:
         offset = max(int(request.args.get("offset", 0)), 0)
