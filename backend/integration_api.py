@@ -457,6 +457,6 @@ def register_integration_api(app):
 
     @blueprint.get("/standarisasi-material")
     def standarisasi_material():
-        return list_resource("standarisasi-material", "/api/integration/v1/standarisasi-material")
+        return list_resource("standarisasi-material", "/api/standarisasi-material")
 
     app.register_blueprint(blueprint, url_prefix=API_PREFIX)

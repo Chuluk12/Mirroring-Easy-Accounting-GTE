@@ -4866,7 +4866,7 @@ def _build_standarisasi_harga_rows(rows):
     } for row in rows]
 
 
-@app.route("/api/integration/v1/standarisasi-material")
+@app.route("/api/standarisasi-material")
 @jwt_required()
 def api_integration_standarisasi_material():
     # Bypass explicit role checks here because the integration token 
