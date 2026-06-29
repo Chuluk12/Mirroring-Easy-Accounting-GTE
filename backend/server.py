@@ -4880,91 +4880,92 @@ def api_integration_standarisasi_material():
     if not is_integration and not is_admin:
         if not check_permission("spk_standarisasi_harga"):
             return jsonify({"message": "Akses ditolak"}), 403
-        try:
-            offset = max(int(request.args.get("offset", 0)), 0)
-            limit = min(max(int(request.args.get("limit", 100)), 1), 500)
-            search = request.args.get("search", "").strip()
+    try:
+        offset = max(int(request.args.get("offset", 0)), 0)
+        limit = min(max(int(request.args.get("limit", 100)), 1), 500)
+        search = request.args.get("search", "").strip()
 
-            con = fdb.connect(**DB_CONFIG)
-            cur = con.cursor()
+        con = fdb.connect(**DB_CONFIG)
+        cur = con.cursor()
 
-            where_clause = ""
-            params = []
-            if search:
-                where_clause = """
-                    AND (
-                        UPPER(i.ITEMNO) CONTAINING UPPER(?) 
-                        OR UPPER(i.ITEMDESCRIPTION) CONTAINING UPPER(?)
-                        OR UPPER(curr.NOSTANDARBRG) CONTAINING UPPER(?)
-                    )
-                """
-                params = [search, search, search]
-
-            # We need the LATEST standard cost per item, filtered by raw material categories
-            sql = f"""
-                WITH RankedStandards AS (
-                    SELECT 
-                        d.ITEMNO,
-                        s.NOSTANDARBRG,
-                        s.TGLMULAIBRG,
-                        d.NEWCOST,
-                        ROW_NUMBER() OVER (PARTITION BY d.ITEMNO ORDER BY s.TGLMULAIBRG DESC, s.IDSTANDARBRG DESC) as rn
-                    FROM STANDARBIAYABRGDET d
-                    JOIN STANDARBIAYABRG s ON s.NOSTANDARBRG = d.NOSTANDARBRG
-                    WHERE s.STATUS = 1
-                ),
-                LatestStandard AS (
-                    SELECT * FROM RankedStandards WHERE rn = 1
-                ),
-                PreviousStandard AS (
-                    SELECT * FROM RankedStandards WHERE rn = 2
+        where_clause = ""
+        params = []
+        if search:
+            where_clause = """
+                AND (
+                    UPPER(i.ITEMNO) CONTAINING UPPER(?) 
+                    OR UPPER(i.ITEMDESCRIPTION) CONTAINING UPPER(?)
+                    OR UPPER(curr.NOSTANDARBRG) CONTAINING UPPER(?)
                 )
-                SELECT FIRST {limit} SKIP {offset}
-                    i.ITEMNO,
-                    i.ITEMDESCRIPTION,
-                    c.NAME AS JENIS_PERSEDIAAN,
-                    COALESCE(prev.NEWCOST, 0) AS HARGA_LAMA,
-                    COALESCE(curr.NEWCOST, 0) AS HARGA_BARU,
-                    curr.NOSTANDARBRG AS NO_STB
-                FROM ITEM i
-                JOIN ITEMCATEGORY c ON c.CATEGORYID = i.CATEGORYID
-                JOIN LatestStandard curr ON curr.ITEMNO = i.ITEMNO
-                LEFT JOIN PreviousStandard prev ON prev.ITEMNO = i.ITEMNO
-                WHERE (UPPER(c.NAME) CONTAINING 'BAHAN BAKU' 
-                   OR UPPER(c.NAME) CONTAINING 'BAHAN PEMBANTU'
-                   OR UPPER(c.NAME) CONTAINING 'RAW MATERIAL')
-                   {where_clause}
-                ORDER BY i.ITEMNO
             """
-            
-            cur.execute(sql, params)
+            params = [search, search, search]
+
+        # We need the LATEST standard cost per item, filtered by raw material categories
+        sql = f"""
+            WITH RankedStandards AS (
+                SELECT 
+                    d.ITEMNO,
+                    s.NOSTANDARBRG,
+                    s.TGLMULAIBRG,
+                    d.NEWCOST,
+                    ROW_NUMBER() OVER (PARTITION BY d.ITEMNO ORDER BY s.TGLMULAIBRG DESC, s.IDSTANDARBRG DESC) as rn
+                FROM STANDARBIAYABRGDET d
+                JOIN STANDARBIAYABRG s ON s.NOSTANDARBRG = d.NOSTANDARBRG
+                WHERE s.STATUS = 1
+            ),
+            LatestStandard AS (
+                SELECT * FROM RankedStandards WHERE rn = 1
+            ),
+            PreviousStandard AS (
+                SELECT * FROM RankedStandards WHERE rn = 2
+            )
+            SELECT FIRST {limit} SKIP {offset}
+                i.ITEMNO,
+                i.ITEMDESCRIPTION,
+                c.NAME AS JENIS_PERSEDIAAN,
+                COALESCE(prev.NEWCOST, 0) AS HARGA_LAMA,
+                COALESCE(curr.NEWCOST, 0) AS HARGA_BARU,
+                curr.NOSTANDARBRG AS NO_STB,
+                COALESCE(prev.NEWCOST, 0) AS HARGA_AWAL
+            FROM ITEM i
+            JOIN ITEMCATEGORY c ON c.CATEGORYID = i.CATEGORYID
+            JOIN LatestStandard curr ON curr.ITEMNO = i.ITEMNO
+            LEFT JOIN PreviousStandard prev ON prev.ITEMNO = i.ITEMNO
+            WHERE (UPPER(c.NAME) CONTAINING 'BAHAN BAKU' 
+               OR UPPER(c.NAME) CONTAINING 'BAHAN PEMBANTU'
+               OR UPPER(c.NAME) CONTAINING 'RAW MATERIAL')
+               {where_clause}
+            ORDER BY i.ITEMNO
+        """
+        
+        cur.execute(sql, params)
         rows = cur.fetchall()
         
-            # Count total
-            count_sql = f"""
-                WITH RankedStandards AS (
-                    SELECT 
-                        d.ITEMNO,
-                        s.NOSTANDARBRG,
-                        s.TGLMULAIBRG,
-                        ROW_NUMBER() OVER (PARTITION BY d.ITEMNO ORDER BY s.TGLMULAIBRG DESC, s.IDSTANDARBRG DESC) as rn
-                    FROM STANDARBIAYABRGDET d
-                    JOIN STANDARBIAYABRG s ON s.NOSTANDARBRG = d.NOSTANDARBRG
-                    WHERE s.STATUS = 1
-                ),
-                LatestStandard AS (
-                    SELECT * FROM RankedStandards WHERE rn = 1
-                )
-                SELECT COUNT(DISTINCT i.ITEMNO)
-                FROM ITEM i
-                JOIN ITEMCATEGORY c ON c.CATEGORYID = i.CATEGORYID
-                JOIN LatestStandard curr ON curr.ITEMNO = i.ITEMNO
-                WHERE (UPPER(c.NAME) CONTAINING 'BAHAN BAKU' 
-                   OR UPPER(c.NAME) CONTAINING 'BAHAN PEMBANTU'
-                   OR UPPER(c.NAME) CONTAINING 'RAW MATERIAL')
-                   {where_clause}
-            """
-            cur.execute(count_sql, params)
+        # Count total
+        count_sql = f"""
+            WITH RankedStandards AS (
+                SELECT 
+                    d.ITEMNO,
+                    s.NOSTANDARBRG,
+                    s.TGLMULAIBRG,
+                    ROW_NUMBER() OVER (PARTITION BY d.ITEMNO ORDER BY s.TGLMULAIBRG DESC, s.IDSTANDARBRG DESC) as rn
+                FROM STANDARBIAYABRGDET d
+                JOIN STANDARBIAYABRG s ON s.NOSTANDARBRG = d.NOSTANDARBRG
+                WHERE s.STATUS = 1
+            ),
+            LatestStandard AS (
+                SELECT * FROM RankedStandards WHERE rn = 1
+            )
+            SELECT COUNT(DISTINCT i.ITEMNO)
+            FROM ITEM i
+            JOIN ITEMCATEGORY c ON c.CATEGORYID = i.CATEGORYID
+            JOIN LatestStandard curr ON curr.ITEMNO = i.ITEMNO
+            WHERE (UPPER(c.NAME) CONTAINING 'BAHAN BAKU' 
+               OR UPPER(c.NAME) CONTAINING 'BAHAN PEMBANTU'
+               OR UPPER(c.NAME) CONTAINING 'RAW MATERIAL')
+               {where_clause}
+        """
+        cur.execute(count_sql, params)
         total = int(cur.fetchone()[0] or 0)
         
         con.close()
@@ -4978,7 +4979,7 @@ def api_integration_standarisasi_material():
                 "harga_standarisasi_terakhir": float(row[3] or 0),
                 "harga_standarisasi_baru": float(row[4] or 0),
                 "no_stb": str(row[5] or "").strip(),
-                "harga_standarisasi_awal": float(row[3] or 0),
+                "harga_standarisasi_awal": float(row[6] or 0),
             })
 
         return jsonify({
@@ -4986,6 +4987,8 @@ def api_integration_standarisasi_material():
             "total": total
         })
     except Exception as e:
+        print(f"Error api_integration_standarisasi_material: {e}")
+        return jsonify({"message": str(e)}), 500
         print(f"Error api_integration_standarisasi_material: {e}")
         return jsonify({"message": str(e)}), 500
 
