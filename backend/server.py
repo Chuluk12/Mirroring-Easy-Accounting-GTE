@@ -4884,21 +4884,31 @@ def api_integration_standarisasi_material():
         offset = max(int(request.args.get("offset", 0)), 0)
         limit = min(max(int(request.args.get("limit", 100)), 1), 500)
         search = request.args.get("search", "").strip()
+        description = request.args.get("description", "").strip()
 
         con = fdb.connect(**DB_CONFIG)
         cur = con.cursor()
 
         where_clause = ""
         params = []
+        
+        conditions = []
         if search:
-            where_clause = """
-                AND (
+            conditions.append("""
+                (
                     UPPER(i.ITEMNO) CONTAINING UPPER(?) 
                     OR UPPER(i.ITEMDESCRIPTION) CONTAINING UPPER(?)
                     OR UPPER(curr.NOSTANDARBRG) CONTAINING UPPER(?)
                 )
-            """
-            params = [search, search, search]
+            """)
+            params.extend([search, search, search])
+            
+        if description:
+            conditions.append("UPPER(i.ITEMDESCRIPTION) CONTAINING UPPER(?)")
+            params.append(description)
+            
+        if conditions:
+            where_clause = " AND " + " AND ".join(conditions)
 
         # We need the LATEST standard cost per item, filtered by raw material categories
         sql = f"""
