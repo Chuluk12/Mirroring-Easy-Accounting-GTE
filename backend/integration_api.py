@@ -408,54 +408,7 @@ def register_integration_api(app):
 
     @blueprint.get("/standarisasi-harga")
     def standarisasi_harga():
-        auth_error = _auth_error()
-        if auth_error:
-            return auth_error
-
-        offset, limit, pagination_error = _pagination()
-        if pagination_error:
-            return pagination_error
-
-        status_code, upstream = _internal_get(
-            app,
-            "/api/standarisasi-material",
-            [("offset", offset), ("limit", limit)] + [
-                (key, value)
-                for key in ("search", "description")
-                for value in request.args.getlist(key)
-            ],
-        )
-        if status_code >= 400 or upstream.get("error"):
-            return _error_response("standarisasi-harga", status_code, upstream)
-
-        rows = upstream.get("data", [])
-        mapped = []
-        for row in rows:
-            mapped.append({
-                "no_barang": str(row.get("kode_material", "")).strip(),
-                "deskripsi_barang": str(row.get("deskripsi_barang", "")).strip(),
-                "biaya_barang": float(row.get("harga_standarisasi_awal") or 0),
-                "biaya_standar_terakhir": float(row.get("harga_standarisasi_terakhir") or 0),
-                "biaya_standar_baru": float(row.get("harga_standarisasi_baru") or 0),
-                "no_stb": str(row.get("no_stb", "")).strip(),
-                "status": "Aktif",
-            })
-
-        total = int(upstream.get("total", len(mapped)) or 0)
-        return jsonify({
-            "success": True,
-            "api_version": "v1",
-            "resource": "standarisasi-harga",
-            "generated_at": datetime.now().astimezone().isoformat(),
-            "data": mapped,
-            "meta": {
-                "offset": offset,
-                "limit": limit,
-                "count": len(mapped),
-                "total": total,
-                "has_more": offset + len(mapped) < total,
-            },
-        })
+        return list_resource("standarisasi-harga", "/api/standarisasi-harga")
 
     @blueprint.get("/standarisasi-harga/<int:standar_id>/details")
     def standarisasi_harga_details(standar_id):
