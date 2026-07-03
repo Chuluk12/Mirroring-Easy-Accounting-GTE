@@ -4963,10 +4963,22 @@ def api_integration_standarisasi_material():
                 i.ITEMNO,
                 i.ITEMDESCRIPTION,
                 c.NAME AS JENIS_PERSEDIAAN,
+                COALESCE((
+                    SELECT FIRST 1
+                        CASE
+                            WHEN COALESCE(h.QUANTITY, 0) < 0
+                                 AND COALESCE(h.QUANTITY, 0) <> 0
+                            THEN ABS(COALESCE(h.COST, 0) / h.QUANTITY)
+                            ELSE COALESCE(h.COST, 0)
+                        END
+                    FROM ITEMHIST h
+                    WHERE h.ITEMNO = i.ITEMNO
+                      AND COALESCE(h.COST, 0) <> 0
+                    ORDER BY h.TXDATE DESC, h.ITEMHISTID DESC
+                ), 0) AS HARGA_AWAL,
                 COALESCE(prev.NEWCOST, 0) AS HARGA_LAMA,
                 COALESCE(curr.NEWCOST, 0) AS HARGA_BARU,
-                curr.NOSTANDARBRG AS NO_STB,
-                COALESCE(prev.NEWCOST, 0) AS HARGA_AWAL
+                curr.NOSTANDARBRG AS NO_STB
                 FROM ITEM i
                 JOIN ITEMCATEGORY c ON c.CATEGORYID = i.CATEGORYID
                 JOIN LatestStandard curr ON curr.ITEMNO = i.ITEMNO
@@ -5018,10 +5030,10 @@ def api_integration_standarisasi_material():
                 "kode_material": str(row[0] or "").strip(),
                 "deskripsi_barang": str(row[1] or "").strip(),
                 "jenis_persediaan": str(row[2] or "").strip(),
-                "harga_standarisasi_terakhir": float(row[3] or 0),
-                "harga_standarisasi_baru": float(row[4] or 0),
-                "no_stb": str(row[5] or "").strip(),
-                "harga_standarisasi_awal": float(row[6] or 0),
+                "harga_standarisasi_awal": float(row[3] or 0),
+                "harga_standarisasi_terakhir": float(row[4] or 0),
+                "harga_standarisasi_baru": float(row[5] or 0),
+                "no_stb": str(row[6] or "").strip(),
             })
 
         return jsonify({
