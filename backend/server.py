@@ -929,17 +929,17 @@ def _stock_rows_to_records(rows, cost_description_by_item=None):
         minimum_qty = float(r[6] or 0)
         quantity = float(r[7] or 0)
         stock_below_minimum = minimum_qty > 0 and quantity < minimum_qty
-        
-            cost_info = cost_description_by_item.get(item_no, {})
-            if not cost_info:
-                # Fallback check using cleaned up base item number (e.g. ignoring trailing - X)
-                if " - " in item_no:
-                    base_item_no = item_no.rsplit(" - ", 1)[0].strip()
-                    cost_info = cost_description_by_item.get(base_item_no, {})
-            
-            if isinstance(cost_info, str):
-                cost_info = {"label": cost_info, "no_stb": "", "harga_stb": 0.0}
-            
+
+        cost_info = cost_description_by_item.get(item_no, {})
+        if not cost_info:
+            # Fallback check using cleaned up base item number (e.g. ignoring trailing - X)
+            if " - " in item_no:
+                base_item_no = item_no.rsplit(" - ", 1)[0].strip()
+                cost_info = cost_description_by_item.get(base_item_no, {})
+
+        if isinstance(cost_info, str):
+            cost_info = {"label": cost_info, "no_stb": "", "harga_stb": 0.0}
+
         data.append({
             "itemno": item_no,
             "description": str(r[1] or "").strip(),
