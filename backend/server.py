@@ -930,9 +930,15 @@ def _stock_rows_to_records(rows, cost_description_by_item=None):
         quantity = float(r[7] or 0)
         stock_below_minimum = minimum_qty > 0 and quantity < minimum_qty
         
-        cost_info = cost_description_by_item.get(item_no, {})
-        if isinstance(cost_info, str):
-            cost_info = {"label": cost_info, "no_stb": "", "harga_stb": 0.0}
+            cost_info = cost_description_by_item.get(item_no, {})
+            if not cost_info:
+                # Fallback check using cleaned up base item number (e.g. ignoring trailing - X)
+                if " - " in item_no:
+                    base_item_no = item_no.rsplit(" - ", 1)[0].strip()
+                    cost_info = cost_description_by_item.get(base_item_no, {})
+            
+            if isinstance(cost_info, str):
+                cost_info = {"label": cost_info, "no_stb": "", "harga_stb": 0.0}
             
         data.append({
             "itemno": item_no,
@@ -1045,7 +1051,17 @@ def get_stock_data(search="", offset=0, limit=50, filters=None, include_total=Fa
             """, [limit, offset] + where_params)
             rows = cur.fetchall()
 
-        item_nos = [str(r[0] or "").strip() for r in rows if str(r[0] or "").strip()]
+        item_nos_original = [str(r[0] or "").strip() for r in rows if str(r[0] or "").strip()]
+        
+        # Include base item numbers for STB mapping since foreign keys sometimes use PO split prefixes
+        item_nos_set = set()
+        for i_no in item_nos_original:
+            item_nos_set.add(i_no)
+            if " - " in i_no:
+                item_nos_set.add(i_no.rsplit(" - ", 1)[0].strip())
+        
+        item_nos = list(item_nos_set)
+        
         cost_description_by_item = {}
         if item_nos:
             for start in range(0, len(item_nos), 900):
@@ -1069,19 +1085,24 @@ def get_stock_data(search="", offset=0, limit=50, filters=None, include_total=Fa
                         }
 
                 cur.execute(f"""
-                    SELECT ITEMNO, TXDATE, ITEMHISTID
+                    SELECT ITEMNO, TXDATE, ITEMHISTID, COST, QUANTITY
                     FROM ITEMHIST
                     WHERE ITEMNO IN ({in_clause})
                       AND COALESCE(COST, 0) > 0
                     ORDER BY ITEMNO, TXDATE DESC, ITEMHISTID DESC
                 """, item_chunk)
-                for item_no, _tx_date, _itemhist_id in cur.fetchall():
+                for item_no, _tx_date, _itemhist_id, cost, quantity in cur.fetchall():
                     key = str(item_no or "").strip()
                     if key and key not in cost_description_by_item:
+                        qty = float(quantity or 1)
+                        if qty < 0:
+                            actual_cost = abs(float(cost or 0) / qty)
+                        else:
+                            actual_cost = float(cost or 0)
                         cost_description_by_item[key] = {
                             "label": "HPP Metode FIFO",
                             "no_stb": "",
-                            "harga_stb": 0.0
+                            "harga_stb": actual_cost
                         }
         con.close()
         data = _stock_rows_to_records(rows, cost_description_by_item)
