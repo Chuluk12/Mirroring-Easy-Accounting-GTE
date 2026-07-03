@@ -929,6 +929,11 @@ def _stock_rows_to_records(rows, cost_description_by_item=None):
         minimum_qty = float(r[6] or 0)
         quantity = float(r[7] or 0)
         stock_below_minimum = minimum_qty > 0 and quantity < minimum_qty
+        
+        cost_info = cost_description_by_item.get(item_no, {})
+        if isinstance(cost_info, str):
+            cost_info = {"label": cost_info, "no_stb": "", "harga_stb": 0.0}
+            
         data.append({
             "itemno": item_no,
             "description": str(r[1] or "").strip(),
@@ -938,7 +943,9 @@ def _stock_rows_to_records(rows, cost_description_by_item=None):
             "category": str(r[5] or "").strip(),
             "minimum_qty": minimum_qty,
             "quantity": quantity,
-            "cost_description": cost_description_by_item.get(item_no, ""),
+            "cost_description": cost_info.get("label", ""),
+            "no_stb": cost_info.get("no_stb", ""),
+            "harga_stb": cost_info.get("harga_stb", 0.0),
             "stock_note": "Stok di bawah minimum" if stock_below_minimum else "",
             "code_product": str(r[8] or "").strip(),
         })
@@ -1015,11 +1022,10 @@ def get_stock_data(search="", offset=0, limit=50, filters=None, include_total=Fa
             rows, total = _get_stock_search_fallback(cur, search, limit, offset, code_product_expr, filters)
             con.close()
             data = _stock_rows_to_records(rows, {})
-            if include_total:
-                return {"data": data, "total": total}
-            return data
+            # Always return a dict format to keep response structure consistent 
+            return {"data": data, "total": total}
 
-        total = None
+        total = 0
         if include_total:
             cur.execute(f"""
                 SELECT COUNT(*)
@@ -1051,17 +1057,21 @@ def get_stock_data(search="", offset=0, limit=50, filters=None, include_total=Fa
                 item_chunk = item_nos[start:start + 900]
                 in_clause = _build_in_clause(item_chunk)
                 cur.execute(f"""
-                    SELECT d.ITEMNO, s.NOSTANDARBRG, s.TGLMULAIBRG, s.TGLSTANDARBRG
+                    SELECT d.ITEMNO, s.NOSTANDARBRG, s.TGLMULAIBRG, s.TGLSTANDARBRG, d.NEWCOST
                     FROM STANDARBIAYABRG s
                     JOIN STANDARBIAYABRGDET d ON d.NOSTANDARBRG = s.NOSTANDARBRG
                     WHERE d.ITEMNO IN ({in_clause})
                       AND COALESCE(d.NEWCOST, 0) > 0
                     ORDER BY d.ITEMNO, s.TGLMULAIBRG DESC, s.TGLSTANDARBRG DESC, s.NOSTANDARBRG DESC
                 """, item_chunk)
-                for item_no, standard_no, _effective_date, _standard_date in cur.fetchall():
+                for item_no, standard_no, _effective_date, _standard_date, newcost in cur.fetchall():
                     key = str(item_no or "").strip()
                     if key and key not in cost_description_by_item:
-                        cost_description_by_item[key] = f"Standarisasi No :{str(standard_no or '').strip()}"
+                        cost_description_by_item[key] = {
+                            "label": f"Standarisasi No :{str(standard_no or '').strip()}",
+                            "no_stb": str(standard_no or '').strip(),
+                            "harga_stb": float(newcost or 0)
+                        }
 
                 cur.execute(f"""
                     SELECT ITEMNO, TXDATE, ITEMHISTID
@@ -1073,7 +1083,11 @@ def get_stock_data(search="", offset=0, limit=50, filters=None, include_total=Fa
                 for item_no, _tx_date, _itemhist_id in cur.fetchall():
                     key = str(item_no or "").strip()
                     if key and key not in cost_description_by_item:
-                        cost_description_by_item[key] = "HPP Metode FIFO"
+                        cost_description_by_item[key] = {
+                            "label": "HPP Metode FIFO",
+                            "no_stb": "",
+                            "harga_stb": 0.0
+                        }
         con.close()
         data = _stock_rows_to_records(rows, cost_description_by_item)
         if include_total:
