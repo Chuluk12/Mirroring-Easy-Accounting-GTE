@@ -1020,36 +1020,31 @@ def get_stock_data(search="", offset=0, limit=50, filters=None, include_total=Fa
 
         if search:
             rows, total = _get_stock_search_fallback(cur, search, limit, offset, code_product_expr, filters)
-            con.close()
-            data = _stock_rows_to_records(rows, {})
-            # Always return a dict format to keep response structure consistent 
-            return {"data": data, "total": total}
+        else:
+            total = 0
+            if include_total:
+                cur.execute(f"""
+                    SELECT COUNT(*)
+                    FROM ITEM i
+                    LEFT JOIN ITEMCATEGORY c ON c.CATEGORYID = i.CATEGORYID
+                    WHERE {where_sql}
+                """, where_params)
+                total = int(cur.fetchone()[0] or 0)
 
-        total = 0
-        if include_total:
+            order_sql = _stock_order_clause(sort_field, sort_order, code_product_expr)
             cur.execute(f"""
-                SELECT COUNT(*)
+                SELECT FIRST ? SKIP ?
+                    i.ITEMNO, i.ITEMDESCRIPTION, i.ITEMDESCRIPTION2,
+                    i.UNIT1, i.TIPEPERSEDIAAN, c.NAME, i.MINIMUMQTY,
+                    COALESCE((SELECT SUM(h.QUANTITY) FROM ITEMHIST h WHERE h.ITEMNO = i.ITEMNO), 0),
+                    {code_product_expr}
                 FROM ITEM i
                 LEFT JOIN ITEMCATEGORY c ON c.CATEGORYID = i.CATEGORYID
                 WHERE {where_sql}
-            """, where_params)
-            total = int(cur.fetchone()[0] or 0)
+                ORDER BY {order_sql}
+            """, [limit, offset] + where_params)
+            rows = cur.fetchall()
 
-        order_sql = _stock_order_clause(sort_field, sort_order, code_product_expr)
-        cur.execute(f"""
-            SELECT FIRST ? SKIP ?
-                i.ITEMNO, i.ITEMDESCRIPTION, i.ITEMDESCRIPTION2,
-                i.UNIT1, i.TIPEPERSEDIAAN, c.NAME, i.MINIMUMQTY,
-                COALESCE((SELECT SUM(h.QUANTITY) FROM ITEMHIST h WHERE h.ITEMNO = i.ITEMNO), 0),
-                {code_product_expr}
-            FROM ITEM i
-            LEFT JOIN ITEMCATEGORY c ON c.CATEGORYID = i.CATEGORYID
-            WHERE {where_sql}
-            ORDER BY {order_sql}
-        """, [limit, offset] + where_params)
-        rows = cur.fetchall()
-        if search and not rows:
-            rows, total = _get_stock_search_fallback(cur, search, limit, offset, code_product_expr, filters)
         item_nos = [str(r[0] or "").strip() for r in rows if str(r[0] or "").strip()]
         cost_description_by_item = {}
         if item_nos:
