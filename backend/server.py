@@ -1072,15 +1072,15 @@ def get_stock_data(search="", offset=0, limit=50, filters=None, include_total=Fa
                     FROM STANDARBIAYABRG s
                     JOIN STANDARBIAYABRGDET d ON d.NOSTANDARBRG = s.NOSTANDARBRG
                     WHERE d.ITEMNO IN ({in_clause})
-                      AND COALESCE(d.NEWCOST, 0) > 0
                     ORDER BY d.ITEMNO, s.TGLMULAIBRG DESC, s.TGLSTANDARBRG DESC, s.NOSTANDARBRG DESC
                 """, item_chunk)
                 for item_no, standard_no, _effective_date, _standard_date, newcost in cur.fetchall():
                     key = str(item_no or "").strip()
                     if key and key not in cost_description_by_item:
+                        standard_no_text = str(standard_no or '').strip()
                         cost_description_by_item[key] = {
-                            "label": f"Standarisasi No :{str(standard_no or '').strip()}",
-                            "no_stb": str(standard_no or '').strip(),
+                            "label": f"Standarisasi No :{standard_no_text}" if standard_no_text else "",
+                            "no_stb": standard_no_text,
                             "harga_stb": float(newcost or 0)
                         }
 
