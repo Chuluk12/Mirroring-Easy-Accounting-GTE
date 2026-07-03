@@ -5195,16 +5195,24 @@ def api_standarisasi_harga_details(standar_id):
             effective_date, effective_date, standar_id,
             standard_no,
         ])
-        data = [{
-            "detail_id": int(row[0] or 0),
-            "no_barang": str(row[1] or "").strip(),
-            "deskripsi_barang": str(row[2] or "").strip(),
-            "unit": str(row[3] or "").strip(),
-            "biaya_barang": float(row[4] or 0),
-            "biaya_standar_terakhir": float(row[5] or 0),
-            "no_standar_terakhir": str(row[6] or "").strip(),
-            "biaya_standar_baru": float(row[7] or 0),
-        } for row in cur.fetchall()]
+        data = []
+        for row in cur.fetchall():
+            biaya_barang = float(row[4] or 0)
+            biaya_standar_terakhir = float(row[5] or 0)
+            no_standar_terakhir = str(row[6] or "").strip()
+            if biaya_standar_terakhir <= 0:
+                biaya_standar_terakhir = biaya_barang
+
+            data.append({
+                "detail_id": int(row[0] or 0),
+                "no_barang": str(row[1] or "").strip(),
+                "deskripsi_barang": str(row[2] or "").strip(),
+                "unit": str(row[3] or "").strip(),
+                "biaya_barang": biaya_barang,
+                "biaya_standar_terakhir": biaya_standar_terakhir,
+                "no_standar_terakhir": no_standar_terakhir,
+                "biaya_standar_baru": float(row[7] or 0),
+            })
         con.close()
         return jsonify({"data": data, "total": len(data)})
     except Exception as e:
