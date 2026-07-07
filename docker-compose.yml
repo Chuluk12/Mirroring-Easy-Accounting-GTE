@@ -46,7 +46,7 @@ services:
         RUN pnpm install
         COPY . .
         EXPOSE 4175 5175
-        CMD ["pnpm", "run", "dev", "--", "--host"]
+        CMD ["pnpm", "run", "dev", "--", "--host", "--force"]
     ports:
       - "4175:4175" # Preview port
       - "5175:5175" # Dev port
