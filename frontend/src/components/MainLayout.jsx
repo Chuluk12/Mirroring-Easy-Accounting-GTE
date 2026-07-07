@@ -188,6 +188,9 @@ export default function MainLayout() {
     if (hasPermission('spk_standarisasi_harga')) {
       manufakturChildren.push({ key: '/manufaktur/standarisasi-harga', icon: <SafetyOutlined />, label: 'Standarisasi Harga' })
     }
+    if (hasPermission('spk_fifo')) {
+      manufakturChildren.push({ key: '/manufaktur/fifo', icon: <InboxOutlined />, label: 'FIFO' })
+    }
     if (manufakturChildren.length > 0) {
       items.push({
         key: 'manufaktur-group',

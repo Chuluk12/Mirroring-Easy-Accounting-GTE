@@ -55,6 +55,7 @@ GET /spk
 GET /stock
 GET /biaya-produksi
 GET /standarisasi-harga
+GET /fifo
 GET /standarisasi-harga/{standar_id}/details
 ```
 
@@ -72,6 +73,7 @@ maksimum 500.
   `category`, `sort_field`, `sort_order`
 - Biaya Produksi: `search`, `account`, `status`
 - Standarisasi Harga: `search`, `status`, `date_from`, `date_to`
+- FIFO: `search`
 
 Parameter yang tidak didukung menghasilkan status `400`.
 
@@ -167,6 +169,14 @@ Tes satu record:
 ```powershell
 Invoke-RestMethod `
   -Uri "http://127.0.0.1:5000/api/integration/v1/stock?limit=1" `
+  -Headers $headers
+```
+
+Tes FIFO:
+
+```powershell
+Invoke-RestMethod `
+  -Uri "http://127.0.0.1:5000/api/integration/v1/fifo?limit=20&search=ACB-SS4X-00.50" `
   -Headers $headers
 ```
 
