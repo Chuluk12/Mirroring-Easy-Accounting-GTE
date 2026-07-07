@@ -1261,6 +1261,10 @@ def get_stock_filter_options():
 def index():
     return render_template("index.html")
 
+@app.route("/health")
+def health_check():
+    return jsonify({"status": "healthy"}), 200
+
 @app.route("/api/stock")
 @jwt_required()
 def api_stock():
