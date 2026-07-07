@@ -319,10 +319,10 @@ export default function DaftarFPB() {
         }
       >
         <Table
-        sticky={{ offsetHeader: 64 }}
+          className="fpb-freeze-table"
           rowKey={(r, i) => `${r.no_faktur}-${i}`}
           columns={withTableSorters(visibleColumns)} dataSource={data} loading={loading}
-          size="small" scroll={{ x: 2100 }}
+          size="small" scroll={{ x: 2100, y: 'calc(100vh - 340px)' }}
           rowClassName={r =>
             r.status === 'Jatuh Tempo' ? 'row-overdue'
             : r.status === 'Lunas'     ? 'row-lunas' : ''
@@ -340,6 +340,14 @@ export default function DaftarFPB() {
       </Card>
 
       <style>{`
+        .fpb-freeze-table .ant-table-thead > tr > th {
+          position: sticky;
+          top: 0;
+          z-index: 3;
+        }
+        .fpb-freeze-table .ant-table-tbody > tr > td {
+          color: #20243a;
+        }
         .row-overdue td { background: #fff2f0 !important; }
         .row-lunas   td { background: #f6ffed !important; }
       `}</style>

@@ -8,9 +8,7 @@ import './index.css'
 
 ReactDOM.createRoot(document.getElementById('root')).render(
   <React.StrictMode>
-    <ConfigProvider locale={idID} theme={{
-      token: { colorPrimary: '#1a73e8' }
-    }}>
+    <ConfigProvider locale={idID}>
       <App />
     </ConfigProvider>
   </React.StrictMode>

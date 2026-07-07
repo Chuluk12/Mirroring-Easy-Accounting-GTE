@@ -6,6 +6,8 @@ import MainLayout from './components/MainLayout'
 const Dashboard = lazy(() => import('./pages/Dashboard'))
 const Stock = lazy(() => import('./pages/Stock'))
 const SIINAS = lazy(() => import('./pages/SIINAS'))
+const SIINASReferensi = lazy(() => import('./pages/SIINASReferensi'))
+const SIINASValidasiMaterialSatuan3 = lazy(() => import('./pages/SIINASValidasiMaterialSatuan3'))
 const BarangBaru = lazy(() => import('./pages/BarangBaru'))
 const Riwayat = lazy(() => import('./pages/Riwayat'))
 const Users = lazy(() => import('./pages/Users'))
@@ -33,9 +35,9 @@ const GP = lazy(() => import('./pages/Manufaktur/GP'))
 const BiayaProduksi = lazy(() => import('./pages/Manufaktur/BiayaProduksi'))
 const StandarisasiHarga = lazy(() => import('./pages/Manufaktur/StandarisasiHarga'))
 const FIFO = lazy(() => import('./pages/Manufaktur/FIFO'))
-const HPP = lazy(() => import('./pages/Akuntansi/HPP'))
+const ProfitLoss = lazy(() => import('./pages/Akuntansi/ProfitLoss'))
 const Aset = lazy(() => import('./pages/Akuntansi/Aset'))
-const BebanGaji = lazy(() => import('./pages/Akuntansi/BebanGaji'))
+const Pengembangan = lazy(() => import('./pages/Akuntansi/Pengembangan'))
 
 function PrivateRoute({ children, module }) {
   const { user, loading, hasPermission } = useAuth()
@@ -53,9 +55,10 @@ function AppRoutes() {
         <Route path="/" element={<PrivateRoute><MainLayout /></PrivateRoute>}>
           <Route index element={<Dashboard />} />
           <Route path="stock"       element={<PrivateRoute module="stock"><Stock /></PrivateRoute>} />
-          <Route path="siinas/barang" element={<PrivateRoute module="siinas"><SIINAS /></PrivateRoute>} />
-          <Route path="siinas/valuasi-rinci" element={<PrivateRoute module="siinas"><SIINAS /></PrivateRoute>} />
-          <Route path="siinas" element={<Navigate to="/siinas/barang" replace />} />
+          <Route path="siinas/monitoring-report" element={<PrivateRoute module="siinas"><SIINAS /></PrivateRoute>} />
+          <Route path="siinas/referensi" element={<PrivateRoute module="siinas"><SIINASReferensi /></PrivateRoute>} />
+          <Route path="siinas/validasi-material-satuan-3" element={<PrivateRoute module="siinas"><SIINASValidasiMaterialSatuan3 /></PrivateRoute>} />
+          <Route path="siinas" element={<Navigate to="/siinas/monitoring-report" replace />} />
           <Route path="barang-baru" element={<PrivateRoute module="barang-baru"><BarangBaru /></PrivateRoute>} />
           <Route path="riwayat"     element={<PrivateRoute module="riwayat"><Riwayat /></PrivateRoute>} />
           <Route path="users"       element={<PrivateRoute module="users"><Users /></PrivateRoute>} />
@@ -90,10 +93,11 @@ function AppRoutes() {
           <Route path="spk" element={<Navigate to="/manufaktur/spk" replace />} />
 
           {/* Sub-menu Akuntansi */}
-          <Route path="akuntansi/hpp" element={<PrivateRoute module="akuntansi"><HPP /></PrivateRoute>} />
+          <Route path="akuntansi/hpp" element={<PrivateRoute module="akuntansi"><Pengembangan title="HPP" /></PrivateRoute>} />
+          <Route path="akuntansi/profit-loss" element={<PrivateRoute module="akuntansi"><ProfitLoss /></PrivateRoute>} />
           <Route path="akuntansi/aset" element={<PrivateRoute module="akuntansi"><Aset /></PrivateRoute>} />
-          <Route path="akuntansi/beban-gaji" element={<PrivateRoute module="akuntansi"><BebanGaji /></PrivateRoute>} />
-          <Route path="akuntansi" element={<Navigate to="/akuntansi/hpp" replace />} />
+          <Route path="akuntansi/beban-gaji" element={<PrivateRoute module="akuntansi"><Pengembangan title="Beban" /></PrivateRoute>} />
+          <Route path="akuntansi" element={<Navigate to="/akuntansi/profit-loss" replace />} />
         </Route>
       </Routes>
     </Suspense>
@@ -105,22 +109,22 @@ function App() {
     <ConfigProvider
       theme={{
         token: {
-          colorPrimary: '#d41452',
-          colorSuccess: '#00a92f',
-          colorInfo: '#11b7d8',
-          colorWarning: '#ff7a00',
-          colorError: '#f2293a',
-          colorBgLayout: '#f4f7fb',
-          colorText: '#20243a',
-          colorTextSecondary: '#697087',
+          colorPrimary: '#0b4fb3',
+          colorSuccess: '#1f9d55',
+          colorInfo: '#1b4fd8',
+          colorWarning: '#f59e0b',
+          colorError: '#e8212a',
+          colorBgLayout: '#f2f6fc',
+          colorText: '#0d1a3a',
+          colorTextSecondary: '#64748b',
           borderRadius: 8,
           wireframe: false,
         },
         components: {
           Layout: {
-            bodyBg: '#f4f7fb',
+            bodyBg: '#f2f6fc',
             headerBg: 'rgba(255,255,255,0.88)',
-            siderBg: '#14172b',
+            siderBg: '#061a44',
           },
           Card: {
             headerBg: 'transparent',
@@ -132,13 +136,13 @@ function App() {
           },
           Table: {
             headerBg: '#f7f9fd',
-            headerColor: '#343a56',
-            rowHoverBg: '#fff5f8',
+            headerColor: '#1e2b4f',
+            rowHoverBg: '#eef5ff',
           },
           Menu: {
-            darkItemBg: '#14172b',
-            darkSubMenuItemBg: '#101326',
-            darkItemSelectedBg: '#d41452',
+            darkItemBg: '#061a44',
+            darkSubMenuItemBg: '#041330',
+            darkItemSelectedBg: '#0b4fb3',
             darkItemSelectedColor: '#ffffff',
             darkItemHoverBg: 'rgba(255,255,255,0.08)',
           },

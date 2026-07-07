@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Button, Card, Col, DatePicker, Divider, Modal, Popover, Progress, Row, Space, Statistic, Table, Tag, Tooltip, Typography } from 'antd'
+import { Button, Card, Col, DatePicker, Divider, Modal, Popover, Progress, Row, Select, Space, Statistic, Table, Tag, Tooltip, Typography, message } from 'antd'
 import {
   ArrowDownOutlined,
   ArrowUpOutlined,
@@ -7,6 +7,7 @@ import {
   CheckCircleOutlined,
   ClockCircleOutlined,
   DollarOutlined,
+  FileExcelOutlined,
   FileTextOutlined,
   InboxOutlined,
   ShoppingCartOutlined,
@@ -18,8 +19,9 @@ import {
   WarningOutlined,
 } from '@ant-design/icons'
 import dayjs from 'dayjs'
-import api from '../api/client'
+import api, { getApiErrorMessage } from '../api/client'
 import { useAuth } from '../context/AuthContext'
+import { downloadXLS } from '../utils/exportXls'
 
 const { RangePicker } = DatePicker
 const { Text, Title } = Typography
@@ -49,6 +51,8 @@ const emptySummary = {
     top_customers_by_amount: [],
     top_customers_by_count: [],
     outstanding_receivables: [],
+    monthly_sales_amount: [],
+    monthly_products_by_amount: [],
     invoice_period: 0,
     invoice_month: 0,
     invoice_amount_period: 0,
@@ -416,6 +420,23 @@ function SalesRankingDetailModal({ detail, onClose }) {
       render: value => <Text strong>{formatCurrency(value)}</Text>,
     },
     {
+      title: 'Discount',
+      dataIndex: 'discount_amount',
+      width: 140,
+      align: 'right',
+      render: (value, record) => {
+        const amount = Number(value || 0)
+        if (!amount) return <Text type="secondary">-</Text>
+        const pct = Number(record.discount_pct ?? record.disc_pct ?? 0)
+        return (
+          <Space direction="vertical" size={0} style={{ alignItems: 'flex-end' }}>
+            <Text type="danger">{formatCurrency(amount)}</Text>
+            {pct > 0 && <Text type="secondary" style={{ fontSize: 11 }}>{pct.toLocaleString('id-ID', { maximumFractionDigits: 2 })}%</Text>}
+          </Space>
+        )
+      },
+    },
+    {
       title: 'No PO',
       dataIndex: 'no_po_customer',
       width: 135,
@@ -472,6 +493,13 @@ function SalesRankingDetailModal({ detail, onClose }) {
           {row.itemno && (
             <DetailMetric label="Kode Barang" value={row.itemno} color={purple} />
           )}
+          {row.code_product_key && (
+            <DetailMetric
+              label="Code Product"
+              value={row.code_product || '(Kosong)'}
+              color={purple}
+            />
+          )}
           {row.customerno && (
             <DetailMetric label="Kode Customer" value={row.customerno} color={purple} />
           )}
@@ -488,7 +516,7 @@ function SalesRankingDetailModal({ detail, onClose }) {
           dataSource={records}
           loading={detail?.loading}
           pagination={{ pageSize: 10, showSizeChanger: false }}
-          scroll={{ x: 1250, y: 360 }}
+          scroll={{ x: 1390, y: 360 }}
         />
       </Space>
     </Modal>
@@ -535,8 +563,539 @@ function ReceivableList({ rows, loading }) {
   )
 }
 
+function SalesMonthlyAmountChart({ rows, loading, onSelectMonth }) {
+  const safeRows = rows?.length ? rows : []
+  const maxAmount = Math.max(...safeRows.map(row => Number(row.amount || 0)), 1)
+  const width = 920
+  const height = 300
+  const pad = { top: 28, right: 24, bottom: 46, left: 62 }
+  const chartW = width - pad.left - pad.right
+  const chartH = height - pad.top - pad.bottom
+  const slot = chartW / Math.max(safeRows.length, 1)
+  const barW = Math.min(42, Math.max(18, slot * 0.54))
+  const yFor = value => pad.top + chartH - (Number(value || 0) / maxAmount) * chartH
+
+  return (
+    <Card
+      title={<span><DollarOutlined style={{ color: orange }} /> Amount Penjualan per Bulan</span>}
+      loading={loading}
+      style={{ borderRadius: 8, border: softBorder, height: '100%' }}
+    >
+      <svg viewBox={`0 0 ${width} ${height}`} style={{ width: '100%', height: 310, display: 'block' }}>
+        <defs>
+          <linearGradient id="salesMonthlyBar" x1="0" x2="0" y1="0" y2="1">
+            <stop offset="0%" stopColor={orange} stopOpacity="0.95" />
+            <stop offset="100%" stopColor={red} stopOpacity="0.74" />
+          </linearGradient>
+        </defs>
+        <rect x="0" y="0" width={width} height={height} rx="8" fill="#fbfdff" />
+        {[0, 0.25, 0.5, 0.75, 1].map(tick => {
+          const y = pad.top + tick * chartH
+          const value = maxAmount * (1 - tick)
+          return (
+            <g key={tick}>
+              <line x1={pad.left} x2={width - pad.right} y1={y} y2={y} stroke="rgba(100,116,139,0.14)" />
+              <text x={pad.left - 10} y={y + 4} textAnchor="end" fontSize="10" fill="#697087">
+                {formatCompactCurrency(value)}
+              </text>
+            </g>
+          )
+        })}
+        {safeRows.map((row, index) => {
+          const x = pad.left + index * slot + (slot - barW) / 2
+          const y = yFor(row.amount)
+          const barH = pad.top + chartH - y
+          const label = row.month ? dayjs(`${row.month}-01`).format('MMM YY') : row.label
+          return (
+            <g key={row.month || index}>
+              <rect
+                x={x}
+                y={y}
+                width={barW}
+                height={Math.max(barH, row.amount ? 3 : 0)}
+                rx="7"
+                fill="url(#salesMonthlyBar)"
+                style={{ cursor: 'pointer' }}
+                onClick={() => onSelectMonth?.(row)}
+              >
+                <title>{`${row.label || label}: ${formatCurrency(row.amount)} (${formatNumber(row.so_count)} SO)`}</title>
+              </rect>
+              <text
+                x={x + barW / 2}
+                y={height - 20}
+                textAnchor="middle"
+                fontSize="10"
+                fill="#697087"
+              >
+                {label}
+              </text>
+              {row.amount > 0 && (
+                <text
+                  x={x + barW / 2}
+                  y={Math.max(y - 7, 13)}
+                  textAnchor="middle"
+                  fontSize="10"
+                  fontWeight="700"
+                  fill={orange}
+                >
+                  {formatCompactCurrency(row.amount)}
+                </text>
+              )}
+            </g>
+          )
+        })}
+        {safeRows.length === 0 && (
+          <text x={width / 2} y={height / 2} textAnchor="middle" fontSize="13" fill="#697087">
+            Belum ada data penjualan bulanan.
+          </text>
+        )}
+      </svg>
+    </Card>
+  )
+}
+
+function SalesMonthDetailModal({ detail, onClose }) {
+  const month = detail?.month
+  const rows = detail?.rows || []
+  const monthTitle = month?.month ? dayjs(`${month.month}-01`).format('MMMM YYYY') : ''
+  const exportColumns = [
+    { key: 'no_so', label: 'No SO' },
+    { key: 'tgl_so', label: 'Tgl SO', type: 'date' },
+    { key: 'no_po', label: 'No PO' },
+    { key: 'dpp_amount', label: 'Nilai DPP', type: 'number' },
+    { key: 'discount_export', label: 'Discount' },
+  ]
+  const columns = [
+    {
+      title: 'No SO',
+      dataIndex: 'no_so',
+      width: 140,
+      fixed: 'left',
+      render: value => <Text strong style={{ color: '#1a73e8' }}>{value || '-'}</Text>,
+    },
+    {
+      title: 'Tgl SO',
+      dataIndex: 'tgl_so',
+      width: 112,
+      render: value => value ? <Tag color="green">{dayjs(value).format('DD/MM/YYYY')}</Tag> : '-',
+    },
+    {
+      title: 'No PO',
+      dataIndex: 'no_po',
+      ellipsis: true,
+      render: value => value || '-',
+    },
+    {
+      title: 'Nilai DPP',
+      dataIndex: 'dpp_amount',
+      width: 155,
+      align: 'right',
+      render: value => <Text strong style={{ color: orange }}>{formatCurrency(value)}</Text>,
+    },
+    {
+      title: 'Discount',
+      dataIndex: 'discount_amount',
+      width: 150,
+      align: 'right',
+      render: (value, record) => {
+        const amount = Number(value || 0)
+        if (!amount) return <Text type="secondary">-</Text>
+        const pct = Number(record.discount_pct || 0)
+        return (
+          <Space direction="vertical" size={0} style={{ alignItems: 'flex-end' }}>
+            <Text type="danger">{formatCurrency(amount)}</Text>
+            {pct > 0 && <Text type="secondary" style={{ fontSize: 11 }}>{pct.toLocaleString('id-ID', { maximumFractionDigits: 2 })}%</Text>}
+          </Space>
+        )
+      },
+    },
+  ]
+  const handleExport = async () => {
+    if (!month?.month) return
+    try {
+      message.loading({ content: 'Mengambil data export...', key: 'dashboard-month-export', duration: 0 })
+      const res = await api.get('/api/dashboard-sales-transactions', {
+        params: {
+          type: 'month',
+          month: month.month,
+          limit: 100000,
+        },
+      })
+      const exportRows = (res.data.data || []).map(row => ({
+        ...row,
+        discount_export: Number(row.discount_amount || 0)
+          ? `${formatCurrency(row.discount_amount)}${Number(row.discount_pct || 0) ? ` (${Number(row.discount_pct || 0).toLocaleString('id-ID', { maximumFractionDigits: 2 })}%)` : ''}`
+          : '',
+      }))
+      if (!exportRows.length) {
+        message.warning({ content: 'Tidak ada data untuk diekspor', key: 'dashboard-month-export' })
+        return
+      }
+      const filenameMonth = dayjs(`${month.month}-01`).format('YYYY_MM')
+      downloadXLS(exportRows, exportColumns, `detail_so_${filenameMonth}`, `SO ${filenameMonth}`)
+      message.success({ content: `${exportRows.length} baris berhasil diekspor`, key: 'dashboard-month-export' })
+    } catch (error) {
+      message.error({
+        content: error.response?.data?.error || error.response?.data?.message || 'Gagal export Excel',
+        key: 'dashboard-month-export',
+      })
+    }
+  }
+
+  return (
+    <Modal
+      open={Boolean(detail)}
+      onCancel={onClose}
+      footer={null}
+      title={`Detail SO ${monthTitle}`}
+      width={820}
+    >
+      <Space direction="vertical" size={14} style={{ width: '100%' }}>
+        <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+          <Button
+            type="primary"
+            icon={<FileExcelOutlined />}
+            onClick={handleExport}
+            disabled={detail?.loading || !rows.length}
+            style={{ background: '#217346', borderColor: '#217346' }}
+          >
+            Export XLS
+          </Button>
+        </div>
+        <Row gutter={[10, 10]}>
+          <Col xs={24} sm={8}>
+            <DetailMetric label="Total DPP" value={formatCurrency(detail?.summary?.total_dpp ?? month?.amount ?? 0)} color={orange} />
+          </Col>
+          <Col xs={12} sm={8}>
+            <DetailMetric label="Jumlah SO" value={`${formatNumber(detail?.totalSo ?? month?.so_count ?? 0)} SO`} color={cyan} />
+          </Col>
+          <Col xs={12} sm={8}>
+            <DetailMetric label="Total Discount" value={formatCurrency(detail?.summary?.total_discount || 0)} color={red} />
+          </Col>
+        </Row>
+
+        {detail?.error && <Text type="danger">{detail.error}</Text>}
+
+        <Table
+          size="small"
+          rowKey={(record, index) => `${record.no_so}-${index}`}
+          columns={columns}
+          dataSource={rows}
+          loading={detail?.loading}
+          pagination={{ pageSize: 10, showSizeChanger: false }}
+          scroll={{ x: 720, y: 360 }}
+        />
+      </Space>
+    </Modal>
+  )
+}
+
+function MonthlyProductAmountList({ rows, loading, onSelectProduct }) {
+  const availableMonths = useMemo(
+    () => Array.from(new Set((rows || []).map(row => row.month).filter(Boolean))).sort(),
+    [rows],
+  )
+  const availableYears = useMemo(
+    () => Array.from(new Set(availableMonths.map(month => month.slice(0, 4)))).sort(),
+    [availableMonths],
+  )
+  const [selectedYear, setSelectedYear] = useState('')
+  const [selectedMonth, setSelectedMonth] = useState('')
+  const monthsForSelectedYear = useMemo(
+    () => availableMonths.filter(month => !selectedYear || month.startsWith(`${selectedYear}-`)),
+    [availableMonths, selectedYear],
+  )
+
+  useEffect(() => {
+    if (!availableYears.length) {
+      setSelectedYear('')
+      setSelectedMonth('')
+      return
+    }
+    setSelectedYear(current => (
+      availableYears.includes(current)
+        ? current
+        : availableYears[availableYears.length - 1]
+    ))
+  }, [availableYears])
+
+  useEffect(() => {
+    if (!monthsForSelectedYear.length) {
+      setSelectedMonth('')
+      return
+    }
+    setSelectedMonth(current => (
+      current === 'all' || monthsForSelectedYear.includes(current)
+        ? current
+        : monthsForSelectedYear[monthsForSelectedYear.length - 1]
+    ))
+  }, [monthsForSelectedYear])
+
+  const chart = useMemo(() => {
+    const yearRows = selectedYear
+      ? (rows || []).filter(row => row.month?.startsWith(`${selectedYear}-`))
+      : rows || []
+    const safeRows = selectedMonth && selectedMonth !== 'all'
+      ? yearRows.filter(row => row.month === selectedMonth)
+      : yearRows
+    const monthKeys = Array.from(new Set(safeRows.map(row => row.month).filter(Boolean))).sort()
+    const productTotals = new Map()
+    const productNames = new Map()
+    const soTotals = new Map()
+
+    safeRows.forEach(row => {
+      const codeProductKey = row.code_product_key || row.code_product || row.itemno || '__EMPTY__'
+      const codeProductName = row.code_product || row.description || '(Code Product kosong)'
+      productTotals.set(codeProductKey, (productTotals.get(codeProductKey) || 0) + Number(row.amount || 0))
+      productNames.set(codeProductKey, codeProductName)
+      soTotals.set(codeProductKey, (soTotals.get(codeProductKey) || 0) + Number(row.so_count || 0))
+    })
+
+    const topProducts = Array.from(productTotals.entries())
+      .sort((a, b) => b[1] - a[1])
+      .map(([codeProductKey, total]) => ({
+        itemno: codeProductKey,
+        code_product_key: codeProductKey,
+        code_product: codeProductKey === '__EMPTY__' ? '' : codeProductKey,
+        name: productNames.get(codeProductKey) || '(Code Product kosong)',
+        description: productNames.get(codeProductKey) || '(Code Product kosong)',
+        total,
+      }))
+
+    const amountByProductMonth = new Map()
+    safeRows.forEach(row => {
+      const codeProductKey = row.code_product_key || row.code_product || row.itemno || '__EMPTY__'
+      const key = `${codeProductKey}|${row.month || ''}`
+      amountByProductMonth.set(key, (amountByProductMonth.get(key) || 0) + Number(row.amount || 0))
+    })
+
+    const productSeries = topProducts.map(product => ({
+      ...product,
+      values: monthKeys.map(month => amountByProductMonth.get(`${product.itemno}|${month}`) || 0),
+    }))
+    const monthTotals = monthKeys.map((month, index) => productSeries.reduce((sum, product) => sum + Number(product.values[index] || 0), 0))
+    const maxAmount = Math.max(...monthTotals, ...productSeries.map(product => product.total), 1)
+    const summary = {
+      totalAmount: Array.from(productTotals.values()).reduce((sum, value) => sum + Number(value || 0), 0),
+      codeProductCount: productTotals.size,
+      totalSo: Array.from(soTotals.values()).reduce((sum, value) => sum + Number(value || 0), 0),
+    }
+
+    return { monthKeys, productSeries, monthTotals, maxAmount, summary }
+  }, [rows, selectedMonth, selectedYear])
+
+  const width = 760
+  const height = 320
+  const pad = { top: 30, right: 28, bottom: 58, left: 70 }
+  const chartW = width - pad.left - pad.right
+  const chartH = height - pad.top - pad.bottom
+  const yFor = value => pad.top + chartH - (Number(value || 0) / chart.maxAmount) * chartH
+  const chartColors = [orange, cyan, green, purple, red]
+  const singleMonth = chart.monthKeys.length <= 1
+  const activeMonthLabel = chart.monthKeys[0] ? dayjs(`${chart.monthKeys[0]}-01`).format('MMMM YYYY') : ''
+  const selectedYearValue = selectedYear || availableYears[availableYears.length - 1] || ''
+  const selectedMonthValue = selectedMonth || monthsForSelectedYear[monthsForSelectedYear.length - 1] || ''
+  const barSlot = chartW / Math.max(chart.monthKeys.length, 1)
+  const barW = Math.min(58, Math.max(28, barSlot * 0.5))
+  const singleBarSlot = 92
+  const singleChartWidth = Math.max(760, chart.productSeries.length * singleBarSlot + 94)
+  const singleChartHeight = 310
+  const singlePad = { top: 34, right: 26, bottom: 74, left: 54 }
+  const singleChartW = singleChartWidth - singlePad.left - singlePad.right
+  const singleChartH = singleChartHeight - singlePad.top - singlePad.bottom
+  const singleYFor = value => singlePad.top + singleChartH - (Number(value || 0) / chart.maxAmount) * singleChartH
+  const singleSlot = singleChartW / Math.max(chart.productSeries.length, 1)
+  const singleBarW = Math.min(46, Math.max(28, singleSlot * 0.42))
+
+  return (
+    <Card
+      title={<span><ShoppingOutlined style={{ color: green }} /> Amount Penjualan Code Product per Bulan</span>}
+      extra={availableMonths.length > 0 && (
+        <Space size={8} wrap>
+          <Select
+            value={selectedYearValue}
+            style={{ width: 96 }}
+            onChange={setSelectedYear}
+            options={availableYears.slice().reverse().map(year => ({ value: year, label: year }))}
+          />
+          <Select
+            value={selectedMonthValue}
+            style={{ width: 140 }}
+            onChange={setSelectedMonth}
+            options={[
+              ...(monthsForSelectedYear.length > 1 ? [{ value: 'all', label: 'Semua Bulan' }] : []),
+              ...monthsForSelectedYear.slice().reverse().map(month => ({
+                value: month,
+                label: dayjs(`${month}-01`).format('MMM YYYY'),
+              })),
+            ]}
+          />
+        </Space>
+      )}
+      loading={loading}
+      style={{ borderRadius: 8, border: softBorder, height: '100%' }}
+    >
+      <Space direction="vertical" size={12} style={{ width: '100%' }}>
+        {chart.productSeries.length > 0 && (
+          <Row gutter={[10, 10]}>
+            <Col xs={24} sm={8}>
+              <DetailMetric label="Total Penjualan" value={formatCurrency(chart.summary.totalAmount)} color={orange} />
+            </Col>
+            <Col xs={12} sm={8}>
+              <DetailMetric label="Code Product" value={formatNumber(chart.summary.codeProductCount)} color={green} />
+            </Col>
+            <Col xs={12} sm={8}>
+              <DetailMetric label="Jumlah SO" value={`${formatNumber(chart.summary.totalSo)} SO`} color={cyan} />
+            </Col>
+          </Row>
+        )}
+        {singleMonth && chart.productSeries.length > 0 ? (
+          <div
+            style={{
+              padding: '16px 14px 10px',
+              borderRadius: 8,
+              background: '#fbfdff',
+              minHeight: 310,
+            }}
+          >
+            <Text strong style={{ display: 'block', fontSize: 14, margin: '0 0 8px 4px' }}>
+              Semua Code Product {activeMonthLabel}
+            </Text>
+            <div style={{ overflowX: 'auto', overflowY: 'hidden', paddingBottom: 2 }}>
+              <svg viewBox={`0 0 ${singleChartWidth} ${singleChartHeight}`} style={{ width: singleChartWidth, height: 315, display: 'block' }}>
+                <rect x="0" y="0" width={singleChartWidth} height={singleChartHeight} rx="8" fill="#fbfdff" />
+                {[0, 0.25, 0.5, 0.75, 1].map(tick => {
+                  const y = singlePad.top + tick * singleChartH
+                  const value = chart.maxAmount * (1 - tick)
+                  return (
+                    <g key={tick}>
+                      <line x1={singlePad.left} x2={singleChartWidth - singlePad.right} y1={y} y2={y} stroke="rgba(100,116,139,0.13)" />
+                      <text x={singlePad.left - 8} y={y + 4} textAnchor="end" fontSize="10" fill="#697087">
+                        {formatCompactCurrency(value)}
+                      </text>
+                    </g>
+                  )
+                })}
+                {chart.productSeries.map((product, index) => {
+                  const color = chartColors[index % chartColors.length]
+                  const x = singlePad.left + index * singleSlot + (singleSlot - singleBarW) / 2
+                  const y = singleYFor(product.total)
+                  const barH = singlePad.top + singleChartH - y
+                  const label = product.name || '(Kosong)'
+                  return (
+                    <g
+                      key={product.itemno}
+                      role="button"
+                      tabIndex={0}
+                      style={{ cursor: onSelectProduct ? 'pointer' : 'default' }}
+                      onClick={() => onSelectProduct?.(product, chart.monthKeys[0], product.total, index)}
+                      onKeyDown={event => {
+                        if (event.key === 'Enter' || event.key === ' ') {
+                          event.preventDefault()
+                          onSelectProduct?.(product, chart.monthKeys[0], product.total, index)
+                        }
+                      }}
+                    >
+                      <rect x={x} y={singlePad.top} width={singleBarW} height={singleChartH} rx="7" fill="#e9edf5" />
+                      <rect
+                        x={x}
+                        y={y}
+                        width={singleBarW}
+                        height={Math.max(barH, product.total ? 3 : 0)}
+                        rx="7"
+                        fill={color}
+                        opacity="0.94"
+                      >
+                        <title>{`${label}: ${formatCurrency(product.total)}`}</title>
+                      </rect>
+                      {product.total > 0 && (
+                        <text x={x + singleBarW / 2} y={Math.max(y - 7, 13)} textAnchor="middle" fontSize="10" fontWeight="700" fill={color}>
+                          {formatCompactCurrency(product.total)}
+                        </text>
+                      )}
+                      <text x={x + singleBarW / 2} y={singleChartHeight - 42} textAnchor="middle" fontSize="10" fontWeight="700" fill="#20243a">
+                        #{index + 1}
+                      </text>
+                      <text x={x + singleBarW / 2} y={singleChartHeight - 24} textAnchor="middle" fontSize="10" fill="#445067">
+                        {label.length > 12 ? `${label.slice(0, 11)}...` : label}
+                      </text>
+                    </g>
+                  )
+                })}
+              </svg>
+            </div>
+          </div>
+        ) : (
+          <svg viewBox={`0 0 ${width} ${height}`} style={{ width: '100%', height: 315, display: 'block' }}>
+            <rect x="0" y="0" width={width} height={height} rx="8" fill="#fbfdff" />
+            {!singleMonth && (
+            <>
+              {[0, 0.25, 0.5, 0.75, 1].map(tick => {
+                const y = pad.top + tick * chartH
+                const value = chart.maxAmount * (1 - tick)
+                return (
+                  <g key={tick}>
+                    <line x1={pad.left} x2={width - pad.right} y1={y} y2={y} stroke="rgba(100,116,139,0.13)" />
+                    <text x={pad.left - 10} y={y + 4} textAnchor="end" fontSize="10" fill="#697087">
+                      {formatCompactCurrency(value)}
+                    </text>
+                  </g>
+                )
+              })}
+              {chart.monthKeys.map((month, monthIndex) => {
+                const x = pad.left + monthIndex * barSlot + (barSlot - barW) / 2
+                let stackY = pad.top + chartH
+                return (
+                  <g key={month}>
+                    {chart.productSeries.map((product, productIndex) => {
+                      const value = Number(product.values[monthIndex] || 0)
+                      const segmentH = (value / chart.maxAmount) * chartH
+                      stackY -= segmentH
+                      return (
+                        <rect
+                          key={`${product.itemno}-${month}`}
+                          x={x}
+                          y={stackY}
+                          width={barW}
+                          height={Math.max(segmentH, value ? 2 : 0)}
+                          rx={productIndex === chart.productSeries.length - 1 ? 5 : 0}
+                          fill={chartColors[productIndex % chartColors.length]}
+                          opacity="0.9"
+                          style={{ cursor: onSelectProduct && value ? 'pointer' : 'default' }}
+                          onClick={() => value && onSelectProduct?.(product, month, value, productIndex)}
+                        >
+                          <title>{`${product.name} - ${dayjs(`${month}-01`).format('MMM YYYY')}: ${formatCurrency(value)}`}</title>
+                        </rect>
+                      )
+                    })}
+                    <text x={x + barW / 2} y={height - 25} textAnchor="middle" fontSize="10" fill="#697087">
+                      {dayjs(`${month}-01`).format('MMM YY')}
+                    </text>
+                    {chart.monthTotals[monthIndex] > 0 && (
+                      <text x={x + barW / 2} y={Math.max(yFor(chart.monthTotals[monthIndex]) - 7, 13)} textAnchor="middle" fontSize="10" fontWeight="700" fill="#20243a">
+                        {formatCompactCurrency(chart.monthTotals[monthIndex])}
+                      </text>
+                    )}
+                  </g>
+                )
+              })}
+            </>
+            )}
+            {chart.productSeries.length === 0 && (
+              <text x={width / 2} y={height / 2} textAnchor="middle" fontSize="13" fill="#697087">
+                Belum ada data amount Code Product per bulan.
+              </text>
+            )}
+          </svg>
+        )}
+      </Space>
+    </Card>
+  )
+}
+
 function SalesModule({ sales, loading, dateRange }) {
   const [detail, setDetail] = useState(null)
+  const [monthDetail, setMonthDetail] = useState(null)
   const openDetail = async (config, row, index) => {
     const baseDetail = {
       ...config,
@@ -599,6 +1158,93 @@ function SalesModule({ sales, loading, dateRange }) {
     getCode: row => row.customerno,
     getName: row => row.name || row.customerno,
     getMeta: row => `${row.customerno || '-'} - ${formatCompactCurrency(row.amount)}`,
+  }
+
+  const openMonthlyProductDetail = async (product, month, amount, index) => {
+    if (!product?.code_product_key || !month) return
+    const monthStart = dayjs(`${month}-01`)
+    const monthEnd = monthStart.endOf('month')
+    const codeProductLabel = product.code_product || product.name || '(Code Product kosong)'
+    const baseDetail = {
+      title: `Detail Penjualan Code Product ${monthStart.format('MMMM YYYY')}`,
+      color: orange,
+      row: {
+        code_product: product.code_product || '',
+        code_product_key: product.code_product_key,
+        description: codeProductLabel,
+        amount,
+      },
+      rank: index + 1,
+      name: codeProductLabel,
+      meta: `${codeProductLabel} - ${monthStart.format('MMMM YYYY')}`,
+      loading: true,
+      records: [],
+      totalSo: 0,
+      error: '',
+    }
+    setDetail(baseDetail)
+
+    try {
+      const res = await api.get('/api/dashboard-sales-transactions', {
+        params: {
+          type: 'code_product',
+          code: product.code_product_key,
+          date_from: monthStart.format('YYYY-MM-DD'),
+          date_to: monthEnd.format('YYYY-MM-DD'),
+          limit: 300,
+        },
+      })
+      setDetail({
+        ...baseDetail,
+        loading: false,
+        records: res.data.data || [],
+        totalSo: res.data.total_so || 0,
+      })
+    } catch (error) {
+      setDetail({
+        ...baseDetail,
+        loading: false,
+        error: error.response?.data?.error || error.response?.data?.message || 'Gagal memuat detail transaksi Code Product.',
+      })
+    }
+  }
+
+  const openMonthDetail = async month => {
+    setMonthDetail({
+      month,
+      loading: true,
+      rows: [],
+      totalSo: month?.so_count || 0,
+      summary: { total_dpp: month?.amount || 0, total_discount: 0 },
+      error: '',
+    })
+
+    try {
+      const res = await api.get('/api/dashboard-sales-transactions', {
+        params: {
+          type: 'month',
+          month: month.month,
+          limit: 300,
+        },
+      })
+      setMonthDetail({
+        month,
+        loading: false,
+        rows: res.data.data || [],
+        totalSo: res.data.total_so || 0,
+        summary: res.data.summary || { total_dpp: month?.amount || 0, total_discount: 0 },
+        error: '',
+      })
+    } catch (error) {
+      setMonthDetail({
+        month,
+        loading: false,
+        rows: [],
+        totalSo: month?.so_count || 0,
+        summary: { total_dpp: month?.amount || 0, total_discount: 0 },
+        error: error.response?.data?.error || error.response?.data?.message || 'Gagal memuat detail SO bulan ini.',
+      })
+    }
   }
 
   return (
@@ -703,10 +1349,28 @@ function SalesModule({ sales, loading, dateRange }) {
         />
       </Col>
       <Col xs={24}>
+        <SalesMonthlyAmountChart
+          rows={sales.monthly_sales_amount}
+          loading={loading}
+          onSelectMonth={openMonthDetail}
+        />
+      </Col>
+      <Col xs={24}>
+        <MonthlyProductAmountList
+          rows={sales.monthly_products_by_amount}
+          loading={loading}
+          onSelectProduct={openMonthlyProductDetail}
+        />
+      </Col>
+      <Col xs={24}>
         <ReceivableList rows={sales.outstanding_receivables} loading={loading} />
       </Col>
     </Row>
     <SalesRankingDetailModal detail={detail} onClose={() => setDetail(null)} />
+    <SalesMonthDetailModal
+      detail={monthDetail}
+      onClose={() => setMonthDetail(null)}
+    />
     </>
   )
 }
@@ -1267,13 +1931,16 @@ export default function Dashboard() {
       const params = {
         date_from: dateFrom.format('YYYY-MM-DD'),
         date_to: dateTo.format('YYYY-MM-DD'),
+        include_accounting: showAccountingDashboard ? '1' : '0',
       }
       const res = await api.get('/api/dashboard-summary', {
         params,
+        timeout: 60000,
       })
       setSummary({ ...emptySummary, ...res.data })
     } catch (e) {
       console.error(e)
+      message.error(getApiErrorMessage(e, 'Gagal memuat ringkasan dashboard'))
     } finally {
       setLoading(false)
     }
@@ -1569,4 +2236,3 @@ export default function Dashboard() {
     </div>
   )
 }
-

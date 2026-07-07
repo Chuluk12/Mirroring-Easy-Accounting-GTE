@@ -1,6 +1,5 @@
 import { defineConfig, loadEnv } from 'vite'
 import react from '@vitejs/plugin-react'
-import path from 'path'
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
@@ -13,30 +12,29 @@ export default defineConfig(({ mode }) => {
       host: '0.0.0.0',
       port: devPort,
       strictPort: false,
-      allowedHosts: ['easy.gte.co.id', 'localhost'],
     },
     preview: {
       host: '0.0.0.0',
       port: previewPort,
       strictPort: false,
-      allowedHosts: ['easy.gte.co.id', 'localhost'],
     },
     build: {
       rollupOptions: {
         output: {
-          manualChunks: undefined,
+          manualChunks(id) {
+            if (!id.includes('node_modules')) return
+            if (id.includes('react') || id.includes('react-dom') || id.includes('react-router-dom')) {
+              return 'vendor-react'
+            }
+            if (id.includes('antd') || id.includes('@ant-design')) {
+              return 'vendor-antd'
+            }
+            if (id.includes('axios') || id.includes('dayjs')) {
+              return 'vendor-utils'
+            }
+          },
         },
       },
     },
-    resolve: {
-      dedupe: ['react', 'react-dom'],
-      alias: {
-        react: path.resolve(__dirname, 'node_modules/react'),
-        'react-dom': path.resolve(__dirname, 'node_modules/react-dom')
-      }
-    },
-    optimizeDeps: {
-      include: ['react', 'react-dom']
-    }
   }
 })

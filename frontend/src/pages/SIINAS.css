@@ -1,0 +1,32 @@
+.siinas-material-breakdown {
+  width: 100%;
+  padding: 8px 12px 12px 28px;
+}
+
+.siinas-material-section {
+  overflow: hidden;
+  border: 1px solid #e6edf7;
+  border-radius: 6px;
+  background: #fff;
+}
+
+.siinas-material-title {
+  display: flex;
+  align-items: center;
+  min-height: 36px;
+  padding: 8px 12px;
+  background: #f7f9fc;
+  border-bottom: 1px solid #e6edf7;
+}
+
+.siinas-material-section .ant-table-wrapper {
+  margin: 0;
+}
+
+.siinas-material-section .ant-table-thead > tr > th {
+  background: #fbfcff;
+}
+
+.siinas-material-section .ant-empty-normal {
+  margin: 18px 0;
+}

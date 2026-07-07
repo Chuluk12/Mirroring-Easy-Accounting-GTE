@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Badge, Dropdown, Layout, Menu, Tag, theme } from 'antd'
+import { Badge, Dropdown, Layout, Menu, Tag, Tooltip, theme } from 'antd'
 import {
   BellOutlined,
   CalculatorOutlined,
@@ -9,6 +9,8 @@ import {
   DollarOutlined,
   ExperimentOutlined,
   FileTextOutlined,
+  FullscreenExitOutlined,
+  FullscreenOutlined,
   HistoryOutlined,
   ImportOutlined,
   InboxOutlined,
@@ -36,10 +38,12 @@ const ROLE_COLOR = {
   marketing: 'green',
   produksi: 'purple',
   ppc: 'geekblue',
+  akutansi: 'gold',
 }
 
 export default function MainLayout() {
   const [collapsed, setCollapsed] = useState(false)
+  const [focusMode, setFocusMode] = useState(false)
   const [todayCount, setTodayCount] = useState(0)
   const navigate = useNavigate()
   const location = useLocation()
@@ -94,7 +98,7 @@ export default function MainLayout() {
               <Badge
                 count={todayCount}
                 overflowCount={999}
-                style={{ marginLeft: 4, backgroundColor: '#d41452', fontSize: 10 }}
+                style={{ marginLeft: 4, backgroundColor: '#e8212a', fontSize: 10 }}
               />
             )}
           </span>
@@ -116,8 +120,9 @@ export default function MainLayout() {
         icon: <FileTextOutlined />,
         label: 'Siinas',
         children: [
-          { key: '/siinas/barang', icon: <InboxOutlined />, label: 'Barang' },
-          { key: '/siinas/valuasi-rinci', icon: <FileTextOutlined />, label: 'Valuasi Rinci' },
+          { key: '/siinas/monitoring-report', icon: <FileTextOutlined />, label: 'Monitoring Report' },
+          { key: '/siinas/validasi-material-satuan-3', icon: <FileTextOutlined />, label: 'Validasi Material Satuan 3' },
+          { key: '/siinas/referensi', icon: <FileTextOutlined />, label: 'Referensi' },
         ],
       })
     }
@@ -201,14 +206,26 @@ export default function MainLayout() {
     }
 
     if (hasPermission('akuntansi')) {
+      const developmentTag = <Tag color="gold" style={{ marginLeft: 6, fontSize: 10 }}>Pengembangan</Tag>
       items.push({
         key: 'akuntansi-group',
         icon: <CalculatorOutlined />,
         label: 'Akuntansi',
         children: [
-          { key: '/akuntansi/hpp', icon: <DollarOutlined />, label: 'HPP' },
+          {
+            key: '/akuntansi/hpp',
+            icon: <DollarOutlined />,
+            label: <span>HPP {developmentTag}</span>,
+            disabled: true,
+          },
+          { key: '/akuntansi/profit-loss', icon: <CalculatorOutlined />, label: 'Profit & Loss' },
           { key: '/akuntansi/aset', icon: <CalculatorOutlined />, label: 'Aset' },
-          { key: '/akuntansi/beban-gaji', icon: <DollarOutlined />, label: 'Beban' },
+          {
+            key: '/akuntansi/beban-gaji',
+            icon: <DollarOutlined />,
+            label: <span>Beban {developmentTag}</span>,
+            disabled: true,
+          },
         ],
       })
     }
@@ -241,10 +258,10 @@ export default function MainLayout() {
   }
 
   return (
-    <Layout style={{ minHeight: '100vh', background: '#f4f7fb' }}>
+    <Layout style={{ minHeight: '100vh', background: '#f2f6fc' }}>
       <Sider
         collapsible
-        collapsed={collapsed}
+        collapsed={focusMode || collapsed}
         onCollapse={setCollapsed}
         breakpoint="lg"
         collapsedWidth={0}
@@ -253,11 +270,11 @@ export default function MainLayout() {
       >
         <div className="easy-brand">
           {!collapsed && <div className="easy-brand-panel" />}
-          <img src="/logo.png" alt="logo" className="easy-brand-logo" />
+          <img src="/logo-gte-horizontal.jpg" alt="Grand Twins Engineering" className="easy-brand-logo" />
           {!collapsed && (
             <div className="easy-brand-copy">
-              <div className="easy-brand-title">Easy Dashboard</div>
-              <div className="easy-brand-subtitle">Accounting Monitor</div>
+              <div className="easy-brand-title">GTE Dashboard</div>
+              <div className="easy-brand-subtitle">Internal Monitor</div>
             </div>
           )}
         </div>
@@ -279,7 +296,7 @@ export default function MainLayout() {
         className="easy-main-layout"
         style={{
           background: 'transparent',
-          marginLeft: collapsed ? 0 : 248,
+          marginLeft: focusMode || collapsed ? 0 : 248,
           transition: 'margin-left 0.2s ease',
         }}
       >
@@ -292,12 +309,22 @@ export default function MainLayout() {
               <DashboardOutlined />
             </div>
             <div>
-              <div className="easy-header-name">Easy Accounting</div>
-              <div className="easy-header-subtitle">Monitoring System</div>
+              <div className="easy-header-name">Grand Twins Engineering</div>
+              <div className="easy-header-subtitle">Dashboard GTE Monitoring System</div>
             </div>
           </div>
 
           <div className="easy-header-actions">
+            <Tooltip title={focusMode ? 'Tampilkan sidebar' : 'Layar penuh'}>
+              <button
+                type="button"
+                className="easy-icon-button"
+                onClick={() => setFocusMode(current => !current)}
+                aria-label={focusMode ? 'Tampilkan sidebar' : 'Layar penuh tanpa sidebar'}
+              >
+                {focusMode ? <FullscreenExitOutlined /> : <FullscreenOutlined />}
+              </button>
+            </Tooltip>
             {hasPermission('riwayat') && (
               <Badge count={todayCount} overflowCount={999}>
                 <button

@@ -193,11 +193,10 @@ export default function DaftarPembelian() {
         }
       >
         <Table
-        sticky={{ offsetHeader: 64 }}
-          className="purchase-freeze-table"
+          className="pembelian-freeze-table"
           rowKey={(r, i) => `${r.no_pembelian}-${r.no_barang}-${i}`}
           columns={withTableSorters(visibleColumns)} dataSource={data} loading={loading} size="small"
-          scroll={{ x: 2050 }}
+          scroll={{ x: 2050, y: 'calc(100vh - 340px)' }}
           onRow={rec => ({
             onClick: () => setSelected(rec),
             style: { cursor: 'pointer' },
@@ -210,6 +209,16 @@ export default function DaftarPembelian() {
           }}
         />
       </Card>
+      <style>{`
+        .pembelian-freeze-table .ant-table-thead > tr > th {
+          position: sticky;
+          top: 0;
+          z-index: 3;
+        }
+        .pembelian-freeze-table .ant-table-tbody > tr > td {
+          color: #20243a;
+        }
+      `}</style>
       <DocumentDetailDrawer
         open={!!selected}
         onClose={() => setSelected(null)}

@@ -40,6 +40,7 @@ const MODULE_META = {
   spk_fifo:      { label: 'Manufaktur - FIFO',   color: 'purple' },
   akuntansi:     { label: 'Akuntansi',           color: 'gold' },
   hpp:           { label: 'HPP',                 color: 'gold' },
+  profit_loss:   { label: 'Profit & Loss',       color: 'gold' },
   aset:          { label: 'Aset',                color: 'cyan' },
   beban_gaji:    { label: 'Beban Gaji',          color: 'volcano' },
   beban_etoll:   { label: 'Beban E-TOLL',        color: 'magenta' },
@@ -61,6 +62,7 @@ const ROLE_COLOR = {
   marketing: 'green',
   produksi: 'purple',
   ppc: 'geekblue',
+  akutansi: 'gold',
 }
 
 const roleColor = (role) => ROLE_COLOR[role] || 'default'

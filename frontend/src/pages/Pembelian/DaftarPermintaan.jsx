@@ -133,7 +133,7 @@ export default function DaftarPermintaan() {
   }
 
   const columns = [
-    { title: 'No. Permintaan', dataIndex: 'no_permintaan', key: 'no_permintaan', width: 160, render: v => <Text strong style={{ color: '#1a73e8' }}>{v}</Text> },
+    { title: 'No. Permintaan', dataIndex: 'no_permintaan', key: 'no_permintaan', width: 160, fixed: 'left', render: v => <Text strong style={{ color: '#1a73e8' }}>{v}</Text> },
     { title: 'Tgl Permintaan', dataIndex: 'tgl_permintaan', key: 'tgl_permintaan', width: 130, render: v => v ? <Tag color="blue">{dayjs(v).format('DD/MM/YYYY')}</Tag> : '-' },
     { title: 'Tgl Target',     dataIndex: 'tgl_target',     key: 'tgl_target',     width: 120, render: v => v ? <Tag color="geekblue">{dayjs(v).format('DD/MM/YYYY')}</Tag> : '-' },
     { title: 'Deskripsi Transaksi', dataIndex: 'deskripsi', key: 'deskripsi', ellipsis: { showTitle: false }, render: v => <Tooltip title={v}><span style={{ color: '#666' }}>{v || '-'}</span></Tooltip> },
@@ -184,10 +184,10 @@ export default function DaftarPermintaan() {
         }
       >
         <Table
-        sticky={{ offsetHeader: 64 }}
+          className="permintaan-freeze-table"
           rowKey={(r, i) => `${r.no_permintaan}-${i}`}
           columns={withTableSorters(visibleColumns)} dataSource={data} loading={loading} size="small"
-          scroll={{ x: 1400 }}
+          scroll={{ x: 1400, y: 'calc(100vh - 340px)' }}
           pagination={{
             ...pagination, showSizeChanger: true,
             pageSizeOptions: ['20', '50', '100'],
@@ -199,6 +199,16 @@ export default function DaftarPermintaan() {
           }}
         />
       </Card>
+      <style>{`
+        .permintaan-freeze-table .ant-table-thead > tr > th {
+          position: sticky;
+          top: 0;
+          z-index: 3;
+        }
+        .permintaan-freeze-table .ant-table-tbody > tr > td {
+          color: #20243a;
+        }
+      `}</style>
     </div>
   )
 }

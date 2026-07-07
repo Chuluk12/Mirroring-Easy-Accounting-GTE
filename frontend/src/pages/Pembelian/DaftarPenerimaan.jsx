@@ -163,11 +163,10 @@ export default function DaftarPenerimaan() {
         }
       >
         <Table
-        sticky={{ offsetHeader: 64 }}
-          className="purchase-freeze-table"
+          className="penerimaan-freeze-table"
           rowKey={(r, i) => `${r.no_penerimaan}-${i}`}
           columns={withTableSorters(visibleColumns)} dataSource={data} loading={loading} size="small"
-          scroll={{ x: 1800 }}
+          scroll={{ x: 1800, y: 'calc(100vh - 340px)' }}
           pagination={{
             ...pagination, showSizeChanger: true,
             pageSizeOptions: ['20', '50', '100'],
@@ -179,6 +178,16 @@ export default function DaftarPenerimaan() {
           }}
         />
       </Card>
+      <style>{`
+        .penerimaan-freeze-table .ant-table-thead > tr > th {
+          position: sticky;
+          top: 0;
+          z-index: 3;
+        }
+        .penerimaan-freeze-table .ant-table-tbody > tr > td {
+          color: #20243a;
+        }
+      `}</style>
     </div>
   )
 }
