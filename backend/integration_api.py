@@ -371,14 +371,11 @@ def register_integration_api(app):
                 }
             }), 404
 
-        columns_param = request.args.get("column", "").strip()
-        if columns_param:
-            requested_cols = {c.strip() for c in columns_param.split(",") if c.strip()}
-            if requested_cols:
-                data = [
-                    {k: v for k, v in item.items() if k in requested_cols}
-                    for item in data
-                ]
+        if requested_cols:
+            data = [
+                {k: v for k, v in item.items() if k in requested_cols}
+                for item in data
+            ]
 
         return jsonify({
             "success": True,
