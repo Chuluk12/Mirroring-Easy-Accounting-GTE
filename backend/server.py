@@ -220,6 +220,12 @@ MODULE_COLUMNS = {
         "tanggal_standarisasi", "template", "status", "status_code",
         "total_barang",
     ],
+    "fifo": [
+        "no_barang", "deskripsi_barang", "kategori_barang",
+        "satuan_1", "stok_satuan_1", "satuan_2", "stok_satuan_2",
+        "satuan_3", "stok_satuan_3", "harga_fifo", "nilai_stock",
+        "sumber_harga",
+    ],
     "monitoring_formula": [
         "wodet_id", "no_spk", "tanggal", "no_barang", "nama_barang", "qty_spk",
         "uom", "no_formula", "formula_material_count", "spk_material_count",
@@ -288,6 +294,7 @@ MODULE_COLUMN_PARENTS = {
     "formula": "spk",
     "biaya_produksi": "spk",
     "standarisasi_harga": "spk",
+    "fifo": "spk",
     "monitoring_formula": "spk",
     "spm": "spk",
     "gp": "spk",
@@ -318,6 +325,7 @@ MODULE_REQUIRED_RESPONSE_KEYS = {
     "formula": ["formula_id", "no_formula", "no_barang"],
     "biaya_produksi": ["no_biaya_produksi"],
     "standarisasi_harga": ["standar_id", "no_standarisasi"],
+    "fifo": ["no_barang"],
     "monitoring_formula": [
         "wodet_id", "no_spk", "no_barang", "materials", "production_details",
         "tgl_selesai", "qty_hasil_produksi", "production_progress", "production_results",
@@ -4894,6 +4902,363 @@ def _build_standarisasi_harga_rows(rows):
         "status": "Aktif" if int(row[6] or 0) == 1 else "Tidak Aktif",
         "total_barang": int(row[7] or 0),
     } for row in rows]
+
+
+FIFO_CATEGORIES = (
+    "Bahan Baku Pembantu",
+    "Bahan Baku",
+    "Barang Setengah Jadi",
+)
+
+
+def _fifo_item_unit_exprs(cur):
+    columns = set(_get_table_columns(cur, "ITEM"))
+    unit2_col = _match_column(columns, ("UNIT2", "ITEMUNIT2", "SECONDUNIT"))
+    unit3_col = _match_column(columns, ("UNIT3", "ITEMUNIT3", "THIRDUNIT"))
+    ratio2_col = _match_column(columns, ("RATIO2", "UNITRATIO2", "RATIOUNIT2"))
+    ratio3_col = _match_column(columns, ("RATIO3", "UNITRATIO3", "RATIOUNIT3"))
+    return {
+        "unit2": f"i.{unit2_col}" if unit2_col else "CAST('' AS VARCHAR(50))",
+        "unit3": f"i.{unit3_col}" if unit3_col else "CAST('' AS VARCHAR(50))",
+        "ratio2": f"i.{ratio2_col}" if ratio2_col else "0",
+        "ratio3": f"i.{ratio3_col}" if ratio3_col else "0",
+    }
+
+
+def _fifo_convert_stock(quantity, ratio):
+    qty = float(quantity or 0)
+    ratio_value = float(ratio or 0)
+    if not ratio_value:
+        return None
+    return qty / ratio_value
+
+
+def _fetch_fifo_cost_map(cur, item_nos):
+    result = {}
+    items = sorted({str(item or "").strip() for item in item_nos if str(item or "").strip()})
+    if not items:
+        return result
+
+    has_fifo_detail = _table_has_columns(cur, "ITEMHIST_DETAIL2", ("ITEMHISTID", "FID", "QUANTITY"))
+    if has_fifo_detail:
+        try:
+            incoming_rows = []
+            for start in range(0, len(items), 100):
+                chunk = items[start:start + 100]
+                cur.execute(f"""
+                    SELECT
+                        h.ITEMNO,
+                        h.ITEMHISTID,
+                        h.TXDATE,
+                        h.QUANTITY,
+                        COALESCE(NULLIF(h.COST, 0), NULLIF(h.NEWCOST, 0), 0),
+                        h.DESCRIPTION
+                    FROM ITEMHIST h
+                    WHERE h.ITEMNO IN ({_build_in_clause(chunk)})
+                      AND COALESCE(h.QUANTITY, 0) > 0
+                    ORDER BY h.ITEMNO, h.TXDATE, h.ITEMHISTID
+                """, chunk)
+                incoming_rows.extend(cur.fetchall())
+
+            used_by_hist = {}
+            hist_ids = [str(row[1] or "").strip() for row in incoming_rows if str(row[1] or "").strip()]
+            for start in range(0, len(hist_ids), 900):
+                chunk = hist_ids[start:start + 900]
+                if not chunk:
+                    continue
+                cur.execute(f"""
+                    SELECT FID, SUM(QUANTITY)
+                    FROM ITEMHIST_DETAIL2
+                    WHERE FID IN ({_build_in_clause(chunk)})
+                    GROUP BY FID
+                """, chunk)
+                for fid, used_qty in cur.fetchall():
+                    used_by_hist[str(fid or "").strip()] = float(used_qty or 0)
+
+            for item_no, itemhist_id, txdate, quantity, unit_cost, description in incoming_rows:
+                key = str(item_no or "").strip()
+                hist_key = str(itemhist_id or "").strip()
+                remaining_qty = float(quantity or 0) - float(used_by_hist.get(hist_key, 0) or 0)
+                if remaining_qty <= 0:
+                    continue
+                cost = float(unit_cost or 0)
+                if key not in result:
+                    result[key] = {
+                        "harga_fifo": cost,
+                        "nilai_stock": 0.0,
+                        "sumber_harga": "FIFO",
+                    }
+                result[key]["nilai_stock"] = float(result[key].get("nilai_stock") or 0) + (remaining_qty * cost)
+        except Exception as fifo_error:
+            print(f"Error fifo stock valuation batch: {fifo_error}")
+
+    for item_no in [item for item in items if item not in result]:
+        cur.execute("""
+            SELECT FIRST 1 TXDATE, ITEMHISTID,
+                CASE
+                    WHEN COALESCE(QUANTITY, 0) < 0 AND COALESCE(QUANTITY, 0) <> 0
+                    THEN ABS(COALESCE(NULLIF(COST, 0), NULLIF(NEWCOST, 0), 0) / QUANTITY)
+                    ELSE COALESCE(NULLIF(COST, 0), NULLIF(NEWCOST, 0), 0)
+                END
+            FROM ITEMHIST
+            WHERE ITEMNO = ?
+              AND COALESCE(NULLIF(COST, 0), NULLIF(NEWCOST, 0), 0) > 0
+            ORDER BY TXDATE DESC, ITEMHISTID DESC
+        """, [item_no])
+        row = cur.fetchone()
+        if row:
+            _txdate, _itemhist_id, unit_cost = row
+            result[item_no] = {
+                "harga_fifo": float(unit_cost or 0),
+                "nilai_stock": None,
+                "sumber_harga": "Riwayat biaya terakhir",
+            }
+    return result
+
+
+def _build_fifo_rows(rows, cost_by_item):
+    data = []
+    for row in rows:
+        item_no = str(row[0] or "").strip()
+        stock_qty = float(row[4] or 0)
+        ratio2 = float(row[7] or 0)
+        ratio3 = float(row[8] or 0)
+        cost_info = cost_by_item.get(item_no, {})
+        harga_fifo = float(cost_info.get("harga_fifo") or 0)
+        nilai_stock = cost_info.get("nilai_stock")
+        if nilai_stock is None:
+            nilai_stock = stock_qty * harga_fifo
+        data.append({
+            "no_barang": item_no,
+            "deskripsi_barang": str(row[1] or "").strip(),
+            "kategori_barang": str(row[2] or "").strip(),
+            "satuan_1": str(row[3] or "").strip(),
+            "stok_satuan_1": round(stock_qty, 4),
+            "satuan_2": str(row[5] or "").strip(),
+            "stok_satuan_2": None if not str(row[5] or "").strip() else round(_fifo_convert_stock(stock_qty, ratio2) or 0, 4),
+            "satuan_3": str(row[6] or "").strip(),
+            "stok_satuan_3": None if not str(row[6] or "").strip() else round(_fifo_convert_stock(stock_qty, ratio3) or 0, 4),
+            "harga_fifo": round(harga_fifo, 4),
+            "nilai_stock": round(float(nilai_stock or 0), 2),
+            "sumber_harga": str(cost_info.get("sumber_harga") or "").strip(),
+        })
+    return data
+
+
+def _fifo_fetch_stock_by_item(cur, item_nos):
+    result = {}
+    items = sorted({str(item or "").strip() for item in item_nos if str(item or "").strip()})
+    for start in range(0, len(items), 900):
+        chunk = items[start:start + 900]
+        cur.execute(f"""
+            SELECT ITEMNO, SUM(QUANTITY)
+            FROM ITEMHIST
+            WHERE ITEMNO IN ({_build_in_clause(chunk)})
+            GROUP BY ITEMNO
+        """, chunk)
+        for item_no, stock_qty in cur.fetchall():
+            result[str(item_no or "").strip()] = float(stock_qty or 0)
+    return result
+
+
+def _get_fifo_summary_counts(cur):
+    cur.execute(f"""
+        SELECT COALESCE(c.NAME, ''), COUNT(*)
+        FROM (
+            SELECT ITEMNO, SUM(QUANTITY) AS STOCK_QTY
+            FROM ITEMHIST
+            GROUP BY ITEMNO
+            HAVING SUM(QUANTITY) > 0
+        ) s
+        JOIN ITEM i ON i.ITEMNO = s.ITEMNO
+        LEFT JOIN ITEMCATEGORY c ON c.CATEGORYID = i.CATEGORYID
+        WHERE COALESCE(i.ITEMTYPE, 0) = 0
+          AND COALESCE(i.SUSPENDED, 0) = 0
+          AND COALESCE(c.NAME, '') IN ({_build_in_clause(FIFO_CATEGORIES)})
+        GROUP BY c.NAME
+        ORDER BY c.NAME
+    """, list(FIFO_CATEGORIES))
+    categories = [
+        {"category": str(category or "").strip(), "count": int(count or 0)}
+        for category, count in cur.fetchall()
+    ]
+    return categories, sum(item["count"] for item in categories)
+
+
+def _get_fifo_search_data(cur, search="", offset=0, limit=50, include_total=False):
+    unit_exprs = _fifo_item_unit_exprs(cur)
+    params = list(FIFO_CATEGORIES)
+    search_sql = ""
+    if search:
+        search_sql = """AND (
+            LOWER(i.ITEMNO) CONTAINING LOWER(?)
+            OR LOWER(i.ITEMDESCRIPTION) CONTAINING LOWER(?)
+            OR LOWER(COALESCE(c.NAME, '')) CONTAINING LOWER(?)
+        )"""
+        params.extend([search, search, search])
+
+    cur.execute(f"""
+        SELECT FIRST 5000
+            i.ITEMNO,
+            i.ITEMDESCRIPTION,
+            c.NAME,
+            i.UNIT1,
+            {unit_exprs["unit2"]},
+            {unit_exprs["unit3"]},
+            {unit_exprs["ratio2"]},
+            {unit_exprs["ratio3"]}
+        FROM ITEM i
+        LEFT JOIN ITEMCATEGORY c ON c.CATEGORYID = i.CATEGORYID
+        WHERE COALESCE(i.ITEMTYPE, 0) = 0
+          AND COALESCE(i.SUSPENDED, 0) = 0
+          AND COALESCE(c.NAME, '') IN ({_build_in_clause(FIFO_CATEGORIES)})
+          {search_sql}
+        ORDER BY c.NAME, i.ITEMNO
+    """, params)
+    candidate_rows = cur.fetchall()
+    stock_by_item = _fifo_fetch_stock_by_item(cur, [row[0] for row in candidate_rows])
+    rows = []
+    category_counts = {}
+    for row in candidate_rows:
+        item_no = str(row[0] or "").strip()
+        stock_qty = float(stock_by_item.get(item_no, 0) or 0)
+        if stock_qty <= 0:
+            continue
+        category = str(row[2] or "").strip()
+        category_counts[category] = category_counts.get(category, 0) + 1
+        rows.append((
+            row[0], row[1], row[2], row[3], stock_qty,
+            row[4], row[5], row[6], row[7],
+        ))
+
+    total = len(rows)
+    page_rows = rows[offset:offset + limit]
+    data = _build_fifo_rows(page_rows, _fetch_fifo_cost_map(cur, [row[0] for row in page_rows]))
+    if include_total:
+        return {
+            "data": data,
+            "total": total,
+            "summary": {
+                "total_items": total,
+                "total_stock_value": round(sum(float(row.get("nilai_stock") or 0) for row in data), 2),
+                "categories": [
+                    {"category": category, "count": count}
+                    for category, count in sorted(category_counts.items())
+                ],
+            },
+        }
+    return data
+
+
+def _get_fifo_page_data(cur, offset=0, limit=50, include_total=False):
+    unit_exprs = _fifo_item_unit_exprs(cur)
+    target_count = offset + limit
+    collected = []
+    candidate_skip = 0
+    candidate_limit = max(min(limit * 3, 150), 50)
+    scanned_all = False
+
+    while len(collected) < target_count:
+        cur.execute(f"""
+            SELECT FIRST ? SKIP ?
+                i.ITEMNO,
+                i.ITEMDESCRIPTION,
+                c.NAME,
+                i.UNIT1,
+                {unit_exprs["unit2"]},
+                {unit_exprs["unit3"]},
+                {unit_exprs["ratio2"]},
+                {unit_exprs["ratio3"]}
+            FROM ITEM i
+            LEFT JOIN ITEMCATEGORY c ON c.CATEGORYID = i.CATEGORYID
+            WHERE COALESCE(i.ITEMTYPE, 0) = 0
+              AND COALESCE(i.SUSPENDED, 0) = 0
+              AND COALESCE(c.NAME, '') IN ({_build_in_clause(FIFO_CATEGORIES)})
+            ORDER BY c.NAME, i.ITEMNO
+        """, [candidate_limit, candidate_skip] + list(FIFO_CATEGORIES))
+        candidate_rows = cur.fetchall()
+        if not candidate_rows:
+            scanned_all = True
+            break
+
+        stock_by_item = _fifo_fetch_stock_by_item(cur, [row[0] for row in candidate_rows])
+        for row in candidate_rows:
+            item_no = str(row[0] or "").strip()
+            stock_qty = float(stock_by_item.get(item_no, 0) or 0)
+            if stock_qty <= 0:
+                continue
+            collected.append((
+                row[0], row[1], row[2], row[3], stock_qty,
+                row[4], row[5], row[6], row[7],
+            ))
+            if len(collected) >= target_count:
+                break
+        candidate_skip += candidate_limit
+
+    page_rows = collected[offset:offset + limit]
+    data = _build_fifo_rows(page_rows, _fetch_fifo_cost_map(cur, [row[0] for row in page_rows]))
+    has_next = not scanned_all or len(collected) > offset + len(page_rows)
+    categories, total_items = _get_fifo_summary_counts(cur)
+    total_estimate = total_items or (len(collected) if scanned_all else max(offset + len(page_rows) + (1 if has_next else 0), len(collected)))
+    summary = {
+        "total_items": total_estimate,
+        "total_stock_value": round(sum(float(row.get("nilai_stock") or 0) for row in data), 2),
+        "categories": categories,
+    }
+    if include_total:
+        return {"data": data, "total": total_estimate, "summary": summary}
+    return data
+
+
+def get_fifo_data(search="", offset=0, limit=50, include_total=False):
+    try:
+        con = fdb.connect(**DB_CONFIG)
+        cur = con.cursor()
+        if str(search or "").strip():
+            result = _get_fifo_search_data(cur, search, offset, limit, include_total)
+            con.close()
+            return result
+
+        result = _get_fifo_page_data(cur, offset, limit, include_total)
+        con.close()
+        return result
+    except Exception as e:
+        print(f"Error get_fifo_data: {e}")
+        empty = {"data": [], "total": 0, "summary": {"total_items": 0, "total_stock_value": 0, "categories": []}}
+        return empty if include_total else []
+
+
+@app.route("/api/fifo")
+@jwt_required()
+def api_fifo():
+    if not check_permission("spk_fifo"):
+        return jsonify({"message": "Akses ditolak"}), 403
+    result = get_fifo_data(
+        search=request.args.get("search", ""),
+        offset=max(int(request.args.get("offset", 0)), 0),
+        limit=min(max(int(request.args.get("limit", 50)), 1), 500),
+        include_total=True,
+    )
+    return jsonify({
+        "data": filter_record_columns("fifo", result.get("data", [])),
+        "total": int(result.get("total") or 0),
+        "summary": result.get("summary") or {},
+    })
+
+
+@app.route("/api/fifo/export")
+@jwt_required()
+def api_fifo_export():
+    if not check_permission("spk_fifo"):
+        return jsonify({"message": "Akses ditolak"}), 403
+    data = get_fifo_data(
+        search=request.args.get("search", ""),
+        offset=0,
+        limit=500000,
+        include_total=False,
+    )
+    data = filter_record_columns("fifo", data)
+    return jsonify({"data": data, "total_rows": len(data)})
 
 
 @app.route("/api/standarisasi-material")

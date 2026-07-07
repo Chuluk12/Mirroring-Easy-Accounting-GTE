@@ -37,6 +37,7 @@ const MODULE_META = {
   spk_gp:        { label: 'Manufaktur - GP',     color: 'purple' },
   spk_biaya_produksi: { label: 'Manufaktur - Biaya Produksi', color: 'purple' },
   spk_standarisasi_harga: { label: 'Manufaktur - Standarisasi Harga', color: 'purple' },
+  spk_fifo:      { label: 'Manufaktur - FIFO',   color: 'purple' },
   akuntansi:     { label: 'Akuntansi',           color: 'gold' },
   hpp:           { label: 'HPP',                 color: 'gold' },
   aset:          { label: 'Aset',                color: 'cyan' },
@@ -80,6 +81,7 @@ const MODULE_PARENT = {
   spk_gp: 'spk',
   spk_biaya_produksi: 'spk',
   spk_standarisasi_harga: 'spk',
+  spk_fifo: 'spk',
 }
 
 export default function Users() {

@@ -32,6 +32,7 @@ const SPM = lazy(() => import('./pages/Manufaktur/SPM'))
 const GP = lazy(() => import('./pages/Manufaktur/GP'))
 const BiayaProduksi = lazy(() => import('./pages/Manufaktur/BiayaProduksi'))
 const StandarisasiHarga = lazy(() => import('./pages/Manufaktur/StandarisasiHarga'))
+const FIFO = lazy(() => import('./pages/Manufaktur/FIFO'))
 const HPP = lazy(() => import('./pages/Akuntansi/HPP'))
 const Aset = lazy(() => import('./pages/Akuntansi/Aset'))
 const BebanGaji = lazy(() => import('./pages/Akuntansi/BebanGaji'))
@@ -82,6 +83,7 @@ function AppRoutes() {
           <Route path="manufaktur/gp"  element={<PrivateRoute module="spk_gp"><GP  /></PrivateRoute>} />
           <Route path="manufaktur/biaya-produksi" element={<PrivateRoute module="spk_biaya_produksi"><BiayaProduksi /></PrivateRoute>} />
           <Route path="manufaktur/standarisasi-harga" element={<PrivateRoute module="spk_standarisasi_harga"><StandarisasiHarga /></PrivateRoute>} />
+          <Route path="manufaktur/fifo" element={<PrivateRoute module="spk_fifo"><FIFO /></PrivateRoute>} />
           <Route path="manufaktur" element={<Navigate to="/manufaktur/spk" replace />} />
 
           {/* Legacy redirect kalau ada link lama ke /spk */}

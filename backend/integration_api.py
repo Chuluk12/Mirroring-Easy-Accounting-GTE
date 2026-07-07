@@ -25,6 +25,7 @@ ALLOWED_PARAMS = {
     },
     "biaya-produksi": {"search", "account", "status"},
     "standarisasi-harga": {"search", "status", "date_from", "date_to"},
+    "fifo": {"search"},
 }
 _RATE_BUCKETS = defaultdict(deque)
 _RATE_LOCK = threading.Lock()
@@ -409,6 +410,10 @@ def register_integration_api(app):
     @blueprint.get("/standarisasi-harga")
     def standarisasi_harga():
         return list_resource("standarisasi-harga", "/api/standarisasi-harga")
+
+    @blueprint.get("/fifo")
+    def fifo():
+        return list_resource("fifo", "/api/fifo")
 
     @blueprint.get("/standarisasi-harga/<int:standar_id>/details")
     def standarisasi_harga_details(standar_id):

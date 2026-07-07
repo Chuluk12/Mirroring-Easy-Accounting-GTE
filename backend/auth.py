@@ -95,7 +95,7 @@ def init_db():
         ("admin",      "spk_monitoring"), ("admin", "spk_formula"),
         ("admin",      "spk_monitoring_formula"), ("admin", "spk_spm"),
         ("admin",      "spk_gp"), ("admin", "spk_biaya_produksi"),
-        ("admin",      "spk_standarisasi_harga"),
+        ("admin",      "spk_standarisasi_harga"), ("admin", "spk_fifo"),
         ("admin",      "akuntansi"), ("admin", "audit"),
 
         ("inventory",  "dashboard"), ("inventory",  "stock"),
@@ -120,14 +120,14 @@ def init_db():
         ("produksi",   "spk_monitoring"), ("produksi", "spk_formula"),
         ("produksi",   "spk_monitoring_formula"), ("produksi", "spk_spm"),
         ("produksi",   "spk_gp"), ("produksi", "spk_biaya_produksi"),
-        ("produksi",   "spk_standarisasi_harga"),
+        ("produksi",   "spk_standarisasi_harga"), ("produksi", "spk_fifo"),
 
         ("ppc",        "dashboard"), ("ppc",        "stock"),
         ("ppc",        "spk"), ("ppc", "spk_spk"),
         ("ppc",        "spk_monitoring"), ("ppc", "spk_formula"),
         ("ppc",        "spk_monitoring_formula"), ("ppc", "spk_spm"),
         ("ppc",        "spk_gp"), ("ppc", "spk_biaya_produksi"),
-        ("ppc",        "spk_standarisasi_harga"),
+        ("ppc",        "spk_standarisasi_harga"), ("ppc", "spk_fifo"),
     ]
 
     # INSERT OR IGNORE = idempotent, aman dijalankan berulang kali
@@ -242,6 +242,7 @@ def upsert_role(role, modules, column_permissions=None):
         "spk_gp": "spk",
         "spk_biaya_produksi": "spk",
         "spk_standarisasi_harga": "spk",
+        "spk_fifo": "spk",
     }
     clean_modules = sorted(set(clean_modules) | {module_parents[m] for m in clean_modules if m in module_parents})
     if not role:
