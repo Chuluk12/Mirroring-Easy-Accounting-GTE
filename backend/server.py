@@ -22,6 +22,8 @@ import os
 import platform
 import threading
 import time
+import redis
+import json
 
 
 def load_env_file(path):
@@ -49,6 +51,16 @@ app = Flask(__name__)
 app.logger.setLevel(
     getattr(logging, os.getenv("EASY_LOG_LEVEL", "INFO").upper(), logging.INFO)
 )
+
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+try:
+    redis_client = redis.from_url(REDIS_URL, decode_responses=True)
+    # Ping to check if Redis is available, ignore if not to prevent crashing
+    redis_client.ping()
+except Exception as e:
+    app.logger.warning(f"Redis not available at {REDIS_URL}: {e}")
+    redis_client = None
+
 if os.getenv("EASY_TRUST_PROXY", "0").lower() in {"1", "true", "yes"}:
     app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 
@@ -4916,6 +4928,16 @@ def api_integration_standarisasi_material():
         search = request.args.get("search", "").strip()
         description = request.args.get("description", "").strip()
 
+        # Check Redis Cache
+        cache_key = f"standarisasi_material:{offset}:{limit}:{search}:{description}"
+        if redis_client:
+            try:
+                cached_data = redis_client.get(cache_key)
+                if cached_data:
+                    return jsonify(json.loads(cached_data))
+            except Exception as e:
+                app.logger.warning(f"Redis cache get error: {e}")
+
         con = fdb.connect(**DB_CONFIG)
         cur = con.cursor()
 
@@ -5036,10 +5058,19 @@ def api_integration_standarisasi_material():
                 "no_stb": str(row[6] or "").strip(),
             })
 
-        return jsonify({
+        response_data = {
             "data": data,
             "total": total
-        })
+        }
+
+        # Save to Redis Cache (10 minutes = 600 seconds)
+        if redis_client:
+            try:
+                redis_client.setex(cache_key, 600, json.dumps(response_data))
+            except Exception as e:
+                app.logger.warning(f"Redis cache set error: {e}")
+
+        return jsonify(response_data)
     except Exception as e:
         print(f"Error api_integration_standarisasi_material: {e}")
         return jsonify({"message": str(e)}), 500
