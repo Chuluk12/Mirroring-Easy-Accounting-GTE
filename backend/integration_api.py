@@ -181,6 +181,23 @@ def _internal_get(app, path, query_params):
     )
     return response.status_code, response.get_json(silent=True) or {}
 
+def _internal_post(app, path, json_data):
+    token = create_access_token(
+        identity="integration-calculator",
+        additional_claims={
+            "id": 0,
+            "name": "Calculator Integration",
+            "role": "admin",
+            "permissions": [],
+        },
+        expires_delta=timedelta(minutes=2),
+    )
+    response = app.test_client().post(
+        path,
+        json=json_data,
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    return response.status_code, response.get_json(silent=True) or {}
 
 def _query_params(resource, offset, limit):
     params = []
@@ -460,5 +477,47 @@ def register_integration_api(app):
     @blueprint.get("/standarisasi-material")
     def standarisasi_material():
         return list_resource("standarisasi-material", "/api/standarisasi-material")
+
+    @blueprint.post("/material-prices/bulk")
+    def material_prices_bulk():
+        auth_error = _auth_error()
+        if auth_error:
+            return auth_error
+            
+        payload = request.get_json(silent=True) or {}
+        part_numbers = payload.get("part_numbers")
+        
+        if not isinstance(part_numbers, list):
+            return jsonify({
+                "success": False,
+                "api_version": "v1",
+                "resource": "material-prices-bulk",
+                "error": {
+                    "code": "invalid_parameters",
+                    "message": "Parameter part_numbers harus berupa array of strings",
+                },
+            }), 400
+            
+        status_code, upstream = _internal_post(
+            app,
+            "/api/standarisasi-material/bulk",
+            {"part_numbers": part_numbers}
+        )
+        
+        if status_code >= 400 or upstream.get("error"):
+            return _error_response("material-prices-bulk", status_code, upstream)
+            
+        rows = upstream.get("data", [])
+        return jsonify({
+            "success": True,
+            "api_version": "v1",
+            "resource": "material-prices-bulk",
+            "generated_at": datetime.now().astimezone().isoformat(),
+            "data": rows,
+            "meta": {
+                "count": len(rows),
+                "total": len(rows),
+            },
+        })
 
     app.register_blueprint(blueprint, url_prefix=API_PREFIX)

@@ -5443,7 +5443,95 @@ def api_integration_standarisasi_material():
     except Exception as e:
         print(f"Error api_integration_standarisasi_material: {e}")
         return jsonify({"message": str(e)}), 500
-        print(f"Error api_integration_standarisasi_material: {e}")
+
+@app.route("/api/standarisasi-material/bulk", methods=["POST"])
+@jwt_required()
+def api_integration_standarisasi_material_bulk():
+    claims = get_jwt()
+    is_integration = claims.get("sub") == "integration-calculator" or claims.get("identity") == "integration-calculator" or get_jwt_identity() == "integration-calculator"
+    is_admin = claims.get("role") == "admin"
+    if not is_integration and not is_admin:
+        if not check_permission("spk_standarisasi_harga"):
+            return jsonify({"message": "Akses ditolak"}), 403
+            
+    payload = request.get_json(silent=True) or {}
+    part_numbers = payload.get("part_numbers", [])
+    if not isinstance(part_numbers, list) or not part_numbers:
+        return jsonify({"data": [], "total": 0})
+        
+    try:
+        con = fdb.connect(**DB_CONFIG)
+        cur = con.cursor()
+        
+        all_data = []
+        # Clean and filter empty values
+        clean_parts = list(set([str(p).strip() for p in part_numbers if str(p).strip()]))
+        
+        for start in range(0, len(clean_parts), 900):
+            chunk = clean_parts[start:start+900]
+            in_clause = _build_in_clause(chunk)
+            
+            sql = f"""
+                WITH RankedStandards AS (
+                    SELECT 
+                        d.ITEMNO,
+                        s.NOSTANDARBRG,
+                        s.TGLMULAIBRG,
+                        d.NEWCOST,
+                        ROW_NUMBER() OVER (PARTITION BY d.ITEMNO ORDER BY s.TGLMULAIBRG DESC, s.IDSTANDARBRG DESC) as rn
+                    FROM STANDARBIAYABRGDET d
+                    JOIN STANDARBIAYABRG s ON s.NOSTANDARBRG = d.NOSTANDARBRG
+                    WHERE s.STATUS = 1
+                ),
+                LatestStandard AS (
+                    SELECT * FROM RankedStandards WHERE rn = 1
+                ),
+                PreviousStandard AS (
+                    SELECT * FROM RankedStandards WHERE rn = 2
+                )
+                SELECT 
+                    i.ITEMNO,
+                    i.ITEMDESCRIPTION,
+                    c.NAME AS JENIS_PERSEDIAAN,
+                    COALESCE((
+                        SELECT FIRST 1
+                            CASE
+                                WHEN COALESCE(h.QUANTITY, 0) < 0
+                                     AND COALESCE(h.QUANTITY, 0) <> 0
+                                THEN ABS(COALESCE(h.COST, 0) / h.QUANTITY)
+                                ELSE COALESCE(h.COST, 0)
+                            END
+                        FROM ITEMHIST h
+                        WHERE h.ITEMNO = i.ITEMNO
+                          AND COALESCE(h.COST, 0) <> 0
+                        ORDER BY h.TXDATE DESC, h.ITEMHISTID DESC
+                    ), 0) AS HARGA_AWAL,
+                    COALESCE(prev.NEWCOST, 0) AS HARGA_LAMA,
+                    COALESCE(curr.NEWCOST, 0) AS HARGA_BARU,
+                    curr.NOSTANDARBRG AS NO_STB
+                FROM ITEM i
+                JOIN ITEMCATEGORY c ON c.CATEGORYID = i.CATEGORYID
+                LEFT JOIN LatestStandard curr ON curr.ITEMNO = i.ITEMNO
+                LEFT JOIN PreviousStandard prev ON prev.ITEMNO = i.ITEMNO
+                WHERE i.ITEMNO IN ({in_clause})
+            """
+            cur.execute(sql, chunk)
+            for row in cur.fetchall():
+                all_data.append({
+                    "kode_material": str(row[0] or "").strip(),
+                    "deskripsi_barang": str(row[1] or "").strip(),
+                    "jenis_persediaan": str(row[2] or "").strip(),
+                    "harga_standarisasi_awal": float(row[3] or 0),
+                    "harga_standarisasi_terakhir": float(row[4] or 0),
+                    "harga_standarisasi_baru": float(row[5] or 0),
+                    "no_stb": str(row[6] or "").strip(),
+                })
+        
+        con.close()
+        return jsonify({"data": all_data, "total": len(all_data)})
+        
+    except Exception as e:
+        print(f"Error api_integration_standarisasi_material_bulk: {e}")
         return jsonify({"message": str(e)}), 500
 
 @app.route("/api/standarisasi-harga")
