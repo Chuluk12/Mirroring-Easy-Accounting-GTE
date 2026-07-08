@@ -6,6 +6,9 @@ from flask_jwt_extended import (
     get_jwt_identity, get_jwt
 )
 from datetime import datetime, timedelta
+import zipfile
+import xml.etree.ElementTree as ET
+from functools import lru_cache
 from pathlib import Path
 from werkzeug.middleware.proxy_fix import ProxyFix
 from auth import (
@@ -1688,6 +1691,39 @@ def _get_siinas_barang(search="", offset=0, limit=50, sort_field="", sort_order=
             "GLACCOUNT", "ACCOUNTNO", "ACCOUNTID", "INVENTORYACCOUNTID",
             "INVACCOUNTID", "GLACCOUNTID",
         ))
+
+        material_account_name_expr = "NULL"
+        material_account_joins = []
+        if account_col and _table_exists(cur, "GLACCNT"):
+            glaccnt_columns = _get_table_columns(cur, "GLACCNT")
+            account_name_col = _match_column(glaccnt_columns, ("ACCOUNTNAME", "GLACCOUNTNAME", "NAME", "DESCRIPTION"))
+            account_no_col = _match_column(glaccnt_columns, ("GLACCOUNT", "ACCOUNTNO", "GLACCOUNTNO", "CODE"))
+            account_id_col = _match_column(glaccnt_columns, ("GLACCOUNTID", "ACCOUNTID", "ID"))
+            if account_name_col and (account_no_col or account_id_col):
+                join_col = account_id_col if account_col.upper().endswith("ID") and account_id_col else account_no_col
+                material_account_name_expr = f"ga.{_identifier(account_name_col)}"
+                material_account_joins.append(
+                    "LEFT JOIN GLACCNT ga ON CAST(ga.%s AS VARCHAR(255)) = CAST(i.%s AS VARCHAR(255))"
+                    % (_identifier(join_col), _identifier(account_col))
+                )
+
+        material_account_display_expr = f"""
+            COALESCE(
+                NULLIF(TRIM(CAST(({material_account_name_expr}) AS VARCHAR(255))), ''),
+                CASE
+                    WHEN NULLIF(TRIM(COALESCE(c.NAME, '')), '') IS NOT NULL
+                    THEN 'Persediaan ' || TRIM(c.NAME)
+                    ELSE ''
+                END
+            )
+        """
+        account_col = _siinas_pick_column(item_columns, (
+            "INVENTORYACCOUNT", "INVENTORYACCOUNTNO", "INVENTORYGLACCOUNT",
+            "INVENTORYGLACCOUNTNO", "INVENTORYGLACCNT", "INVENTORYACCNT",
+            "INVACCOUNT", "INVACCOUNTNO", "INVGLACCOUNT", "INVGLACCOUNTNO",
+            "GLACCOUNT", "ACCOUNTNO", "ACCOUNTID", "INVENTORYACCOUNTID",
+            "INVACCOUNTID", "GLACCOUNTID",
+        ))
         supplier_col = _siinas_pick_column(item_columns, (
             "VENDORNAME", "SUPPLIERNAME", "PREFERREDVENDOR", "PREFEREDVENDOR",
             "PREFERREDVENDORID", "PREFEREDVENDORID", "PREFERREDVENDORNO", "PREFEREDVENDORNO",
@@ -2045,6 +2081,363 @@ def _get_siinas_valuasi_rinci(search="", offset=0, limit=50, date_from="", date_
             print(f"Error close siinas valuasi connection: {close_error}")
 
 
+_SIINAS_KG_UNITS = {"KG", "KGS", "KGM"}
+_SIINAS_REQUIRED_SATUAN3_UNIT = "KGM"
+
+
+def _siinas_normalize_unit(value):
+    return str(value or "").strip().upper().replace(".", "")
+
+
+SIINAS_REFERENSI_FILE = Path(__file__).resolve().parent / "data" / "Referensi Data SIinas.xlsx"
+SIINAS_VALIDASI_SATUAN3_FILE = Path(__file__).resolve().parent / "data" / "Validasi Material Rasio Ke 3.xlsx"
+
+
+def _xlsx_col_index(cell_ref):
+    letters = "".join(ch for ch in str(cell_ref or "") if ch.isalpha()).upper()
+    index = 0
+    for ch in letters:
+        index = index * 26 + (ord(ch) - ord("A") + 1)
+    return index - 1
+
+
+def _xlsx_shared_strings(zf):
+    try:
+        root = ET.fromstring(zf.read("xl/sharedStrings.xml"))
+    except KeyError:
+        return []
+    ns = {"x": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+    values = []
+    for item in root.findall("x:si", ns):
+        texts = [node.text or "" for node in item.findall(".//x:t", ns)]
+        values.append("".join(texts))
+    return values
+
+
+def _xlsx_cell_value(cell, shared_strings):
+    ns = {"x": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+    cell_type = cell.attrib.get("t")
+    if cell_type == "inlineStr":
+        return "".join(node.text or "" for node in cell.findall(".//x:t", ns)).strip()
+    value_node = cell.find("x:v", ns)
+    if value_node is None or value_node.text is None:
+        return ""
+    value = value_node.text
+    if cell_type == "s":
+        try:
+            return str(shared_strings[int(value)] or "").strip()
+        except (ValueError, IndexError):
+            return ""
+    return str(value or "").strip()
+
+
+@lru_cache(maxsize=1)
+def _load_siinas_referensi():
+    if not SIINAS_REFERENSI_FILE.exists():
+        return {"negara": [], "uraian": []}
+
+    with zipfile.ZipFile(SIINAS_REFERENSI_FILE) as zf:
+        shared_strings = _xlsx_shared_strings(zf)
+        root = ET.fromstring(zf.read("xl/worksheets/sheet1.xml"))
+
+    ns = {"x": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+    rows = []
+    for row in root.findall(".//x:sheetData/x:row", ns):
+        values = {}
+        for cell in row.findall("x:c", ns):
+            col_index = _xlsx_col_index(cell.attrib.get("r"))
+            values[col_index] = _xlsx_cell_value(cell, shared_strings)
+        rows.append(values)
+
+    negara = []
+    uraian = []
+    for row in rows[1:]:
+        negara_pemasok = row.get(0, "").strip()
+        kode_negara = row.get(1, "").strip()
+        if negara_pemasok or kode_negara:
+            negara.append({
+                "negara_pemasok": negara_pemasok,
+                "kode_negara": kode_negara,
+            })
+
+        uraian_text = row.get(4, "").strip()
+        kode = row.get(5, "").strip()
+        if uraian_text or kode:
+            uraian.append({
+                "uraian": uraian_text,
+                "kode": kode,
+            })
+
+    return {"negara": negara, "uraian": uraian}
+
+
+def _siinas_parse_number(value):
+    text = str(value or "").strip()
+    if not text:
+        return 0
+    try:
+        return float(text.replace(",", "."))
+    except ValueError:
+        return 0
+
+
+@lru_cache(maxsize=1)
+def _load_siinas_validasi_satuan3_reference():
+    if not SIINAS_VALIDASI_SATUAN3_FILE.exists():
+        return []
+
+    with zipfile.ZipFile(SIINAS_VALIDASI_SATUAN3_FILE) as zf:
+        shared_strings = _xlsx_shared_strings(zf)
+        root = ET.fromstring(zf.read("xl/worksheets/sheet1.xml"))
+
+    ns = {"x": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+    rows = []
+    for row in root.findall(".//x:sheetData/x:row", ns):
+        values = {}
+        for cell in row.findall("x:c", ns):
+            col_index = _xlsx_col_index(cell.attrib.get("r"))
+            values[col_index] = _xlsx_cell_value(cell, shared_strings)
+        rows.append(values)
+
+    result = []
+    seen = set()
+    for row in rows[1:]:
+        item_no = str(row.get(0, "") or "").strip()
+        if not item_no or item_no in seen:
+            continue
+        seen.add(item_no)
+        result.append({
+            "no_barang": item_no,
+            "rasio_3_excel": _siinas_parse_number(row.get(1, "")),
+            "unit_3_excel": str(row.get(2, "") or "").strip(),
+        })
+    return result
+
+
+def _siinas_validasi_satuan3_ratio_map():
+    return {
+        str(row.get("no_barang") or "").strip(): float(row.get("rasio_3_excel") or 0)
+        for row in _load_siinas_validasi_satuan3_reference()
+        if str(row.get("no_barang") or "").strip()
+        and _siinas_normalize_unit(row.get("unit_3_excel")) == _SIINAS_REQUIRED_SATUAN3_UNIT
+        and float(row.get("rasio_3_excel") or 0) > 0
+    }
+
+
+def _get_siinas_validasi_satuan3(search="", offset=0, limit=50):
+    references = _load_siinas_validasi_satuan3_reference()
+    item_nos = [row["no_barang"] for row in references]
+    easy_by_item = {}
+
+    con = connect_easy_db()
+    cur = con.cursor()
+    try:
+        item_columns = _get_table_columns(cur, "ITEM")
+        desc_col = _siinas_pick_column(item_columns, ("ITEMDESCRIPTION", "DESCRIPTION", "ITEMDESC"))
+
+        if desc_col:
+            select_desc = f"i.{_identifier(desc_col)}" if desc_col else "CAST('' AS VARCHAR(255))"
+            for start in range(0, len(item_nos), 300):
+                chunk = item_nos[start:start + 300]
+                cur.execute(f"""
+                    SELECT
+                        i.ITEMNO,
+                        {select_desc}
+                    FROM ITEM i
+                    WHERE i.ITEMNO IN ({_build_in_clause(chunk)})
+                """, chunk)
+                for item_no, description in cur.fetchall():
+                    easy_by_item[str(item_no or "").strip()] = str(description or "").strip()
+    finally:
+        con.close()
+
+    rows = []
+    for ref in references:
+        row = {
+            **ref,
+            "deskripsi_barang": easy_by_item.get(ref["no_barang"], ""),
+        }
+        rows.append(row)
+
+    term = str(search or "").strip().lower()
+    if term:
+        rows = [
+            row for row in rows
+            if term in str(row.get("no_barang", "")).lower()
+            or term in str(row.get("deskripsi_barang", "")).lower()
+            or term in str(row.get("unit_3_excel", "")).lower()
+        ]
+
+    total = len(rows)
+    page_rows = rows[offset:offset + limit] if limit else rows
+    summary = {
+        "total": total,
+    }
+    return {
+        "data": page_rows,
+        "total": total,
+        "summary": summary,
+        "source": SIINAS_VALIDASI_SATUAN3_FILE.name,
+    }
+
+
+def _filter_siinas_referensi_rows(rows, search, keys):
+    term = str(search or "").strip().lower()
+    if not term:
+        return rows
+    return [
+        row for row in rows
+        if any(term in str(row.get(key, "")).lower() for key in keys)
+    ]
+
+
+def _siinas_normalize_country(value):
+    return " ".join(str(value or "").strip().lower().replace(".", "").split())
+
+
+def _siinas_country_code_map():
+    data = _load_siinas_referensi()
+    return {
+        _siinas_normalize_country(row.get("negara_pemasok")): str(row.get("kode_negara") or "").strip()
+        for row in data.get("negara", [])
+        if _siinas_normalize_country(row.get("negara_pemasok")) and str(row.get("kode_negara") or "").strip()
+    }
+
+
+def _siinas_country_code(country):
+    normalized = _siinas_normalize_country(country)
+    if not normalized:
+        return ""
+    aliases = {
+        "indonesia": "indonesia",
+        "id": "indonesia",
+        "ina": "indonesia",
+        "indonesian": "indonesia",
+        "local": "indonesia",
+        "lokal": "indonesia",
+    }
+    code_map = _siinas_country_code_map()
+    return code_map.get(normalized) or code_map.get(aliases.get(normalized, "")) or ""
+
+
+def _siinas_supplier_detail(name, country):
+    country_text = str(country or "").strip()
+    return {
+        "nama_pemasok": str(name or "").strip(),
+        "negara_pemasok": country_text,
+        "kode_negara": _siinas_country_code(country_text),
+    }
+
+
+def _siinas_resolve_supplier_details(cur, supplier_refs):
+    refs = [str(ref or "").strip() for ref in supplier_refs if str(ref or "").strip()]
+    if not refs or not _table_exists(cur, "PERSONDATA"):
+        return {}
+
+    person_columns = _get_table_columns(cur, "PERSONDATA")
+    person_name_col = _match_column(person_columns, ("NAME", "PERSONNAME", "COMPANYNAME"))
+    person_no_col = _match_column(person_columns, ("PERSONNO", "VENDORNO", "SUPPLIERNO", "CODE"))
+    person_id_col = _match_column(person_columns, ("ID", "PERSONID", "VENDORID", "SUPPLIERID"))
+    if not person_name_col:
+        return {}
+
+    detail_by_ref = {}
+    country_expr = _siinas_person_country_expr(person_columns)
+    for chunk in [refs[start:start + 300] for start in range(0, len(refs), 300)]:
+        lookup_conditions = []
+        lookup_params = []
+        for column in (person_no_col, person_id_col, person_name_col):
+            if column:
+                lookup_conditions.append(
+                    f"CAST(pd.{_identifier(column)} AS VARCHAR(255)) IN ({_build_in_clause(chunk)})"
+                )
+                lookup_params.extend(chunk)
+        if not lookup_conditions:
+            continue
+
+        select_no = f"CAST(pd.{_identifier(person_no_col)} AS VARCHAR(255))" if person_no_col else "CAST(NULL AS VARCHAR(255))"
+        select_id = f"CAST(pd.{_identifier(person_id_col)} AS VARCHAR(255))" if person_id_col else "CAST(NULL AS VARCHAR(255))"
+        cur.execute(f"""
+            SELECT {select_no}, {select_id}, pd.{_identifier(person_name_col)}, {country_expr}
+            FROM PERSONDATA pd
+            WHERE {' OR '.join(lookup_conditions)}
+        """, lookup_params)
+        for person_no, person_id, person_name, country in cur.fetchall():
+            detail = _siinas_supplier_detail(person_name, country)
+            for ref in (person_no, person_id, person_name):
+                ref_text = str(ref or "").strip()
+                if ref_text:
+                    detail_by_ref[ref_text] = detail
+
+    return detail_by_ref
+
+
+def _siinas_resolve_latest_supplier_by_item(cur, item_nos):
+    item_refs = sorted({str(item_no or "").strip() for item_no in item_nos if str(item_no or "").strip()})
+    if not item_refs or not _table_exists(cur, "PERSONDATA"):
+        return {}
+
+    person_columns = _get_table_columns(cur, "PERSONDATA")
+    person_name_col = _match_column(person_columns, ("NAME", "PERSONNAME", "COMPANYNAME"))
+    person_id_col = _match_column(person_columns, ("ID", "PERSONID", "VENDORID", "SUPPLIERID"))
+    if not person_name_col or not person_id_col:
+        return {}
+
+    country_expr = _siinas_person_country_expr(person_columns)
+    select_person = f"pd.{_identifier(person_name_col)}, {country_expr}"
+    join_person = f"LEFT JOIN PERSONDATA pd ON pd.{_identifier(person_id_col)} = src.VENDORID"
+    detail_by_item = {}
+
+    purchase_sources = []
+    if _table_has_columns(cur, "APITMDET", ("ITEMNO", "APINVOICEID")) and _table_has_columns(cur, "APINV", ("APINVOICEID", "VENDORID", "INVOICEDATE")):
+        purchase_sources.append((
+            "ap",
+            """
+                SELECT det.ITEMNO, ai.VENDORID, ai.INVOICEDATE, ai.APINVOICEID
+                FROM APITMDET det
+                JOIN APINV ai ON ai.APINVOICEID = det.APINVOICEID
+                WHERE det.ITEMNO IN ({placeholders})
+                  AND ai.VENDORID IS NOT NULL
+            """,
+            "INVOICEDATE",
+            "APINVOICEID",
+        ))
+    if _table_has_columns(cur, "PODET", ("ITEMNO", "POID")) and _table_has_columns(cur, "PO", ("POID", "VENDORID", "PODATE")):
+        purchase_sources.append((
+            "po",
+            """
+                SELECT det.ITEMNO, po.VENDORID, po.PODATE, po.POID
+                FROM PODET det
+                JOIN PO po ON po.POID = det.POID
+                WHERE det.ITEMNO IN ({placeholders})
+                  AND po.VENDORID IS NOT NULL
+            """,
+            "PODATE",
+            "POID",
+        ))
+
+    for chunk in [item_refs[start:start + 300] for start in range(0, len(item_refs), 300)]:
+        for _source, source_sql, date_col, id_col in purchase_sources:
+            unresolved = [item_no for item_no in chunk if item_no not in detail_by_item]
+            if not unresolved:
+                break
+            try:
+                cur.execute(f"""
+                    SELECT src.ITEMNO, {select_person}
+                    FROM ({source_sql.format(placeholders=_build_in_clause(unresolved))}) src
+                    {join_person}
+                    ORDER BY src.ITEMNO, src.{date_col} DESC, src.{id_col} DESC
+                """, unresolved)
+                for item_no, person_name, country in cur.fetchall():
+                    item_text = str(item_no or "").strip()
+                    if item_text and item_text not in detail_by_item:
+                        detail_by_item[item_text] = _siinas_supplier_detail(person_name, country)
+            except Exception as supplier_error:
+                print(f"Error resolve siinas latest supplier by item: {supplier_error}")
+
+    return detail_by_item
+
+
 @app.route("/api/siinas/barang")
 @jwt_required()
 def api_siinas_barang():
@@ -2089,6 +2482,598 @@ def api_siinas_valuasi_rinci():
     except Exception as e:
         print(f"Error api_siinas_valuasi_rinci: {e}")
         return jsonify({"data": [], "total": 0, "error": str(e)}), 500
+
+
+@app.route("/api/siinas/referensi")
+@jwt_required()
+def api_siinas_referensi():
+    if not check_permission("siinas"):
+        return jsonify({"message": "Akses ditolak"}), 403
+
+    search = request.args.get("search", "")
+    data = _load_siinas_referensi()
+    negara = _filter_siinas_referensi_rows(data["negara"], search, ("negara_pemasok", "kode_negara"))
+    uraian = _filter_siinas_referensi_rows(data["uraian"], search, ("uraian", "kode"))
+
+    return jsonify({
+        "negara": negara,
+        "uraian": uraian,
+        "summary": {
+            "negara_count": len(negara),
+            "uraian_count": len(uraian),
+        },
+        "source": SIINAS_REFERENSI_FILE.name,
+    })
+
+
+@app.route("/api/siinas/validasi-material-satuan-3")
+@jwt_required()
+def api_siinas_validasi_material_satuan3():
+    if not check_permission("siinas"):
+        return jsonify({"message": "Akses ditolak"}), 403
+    try:
+        search = request.args.get("search", "")
+        offset = int(request.args.get("offset", 0))
+        limit = int(request.args.get("limit", 50))
+        return jsonify(_get_siinas_validasi_satuan3(search, offset, limit))
+    except Exception as e:
+        print(f"Error api_siinas_validasi_material_satuan3: {e}")
+        return jsonify({"data": [], "total": 0, "summary": {}, "error": str(e)}), 500
+
+
+def _get_siinas_monitoring_report_full(search="", offset=0, limit=50, date_from="", date_to="", exact_code=None):
+    """Ringkasan hasil produksi per tanggal GP dan Code Product."""
+    validasi_satuan3_ratio_by_item = _siinas_validasi_satuan3_ratio_map()
+    con = fdb.connect(**DB_CONFIG)
+    cur = con.cursor()
+    try:
+        item_columns = _get_table_columns(cur, "ITEM")
+        code_product_col = _siinas_pick_column(item_columns, ("CODEPRODUCT", "ITEMRESERVED1", "RESERVED1"))
+        hs_code_col = _siinas_pick_column(item_columns, ("HSCODE", "HS_CODE", "ITEMRESERVED4", "RESERVED4"))
+        kbli_col = _siinas_pick_column(item_columns, ("KBLI", "ITEMRESERVED5", "RESERVED5"))
+        unit2_col = _siinas_pick_column(item_columns, ("UNIT2", "ITEMUNIT2", "SECONDUNIT"))
+        unit3_col = _siinas_pick_column(item_columns, ("UNIT3", "ITEMUNIT3", "THIRDUNIT"))
+        ratio2_col = _siinas_pick_column(item_columns, ("RATIO2", "UNITRATIO2", "RATIOUNIT2"))
+        ratio3_col = _siinas_pick_column(item_columns, ("RATIO3", "UNITRATIO3", "RATIOUNIT3"))
+        account_col = _siinas_pick_column(item_columns, (
+            "INVENTORYACCOUNT", "INVENTORYACCOUNTNO", "INVENTORYGLACCOUNT",
+            "INVENTORYGLACCOUNTNO", "INVENTORYGLACCNT", "INVENTORYACCNT",
+            "INVACCOUNT", "INVACCOUNTNO", "INVGLACCOUNT", "INVGLACCOUNTNO",
+            "GLACCOUNT", "ACCOUNTNO", "ACCOUNTID", "INVENTORYACCOUNTID",
+            "INVACCOUNTID", "GLACCOUNTID",
+        ))
+        supplier_col = _siinas_pick_column(item_columns, (
+            "VENDORNAME", "SUPPLIERNAME", "PREFERREDVENDOR", "PREFEREDVENDOR",
+            "PREFERREDVENDORID", "PREFEREDVENDORID", "PREFERREDVENDORNO", "PREFEREDVENDORNO",
+            "PREFERREDVENDORCODE", "PREFEREDVENDORCODE", "PREFERREDVENDORSUPPLIER",
+            "PREFERREDVENDORSUPPLIERID", "PREFERREDVENDORSUPPLIERNO",
+            "PREFERREDSUPPLIER", "PREFEREDSUPPLIER", "PREFERREDSUPPLIERID",
+            "PREFEREDSUPPLIERID", "PREFERREDSUPPLIERNO", "PREFEREDSUPPLIERNO",
+            "PREFVENDORID", "PREFVENDORNO", "DEFAULTVENDORID", "DEFAULTVENDORNO",
+            "PREFSUPPLIERID", "PREFSUPPLIERNO", "DEFAULTSUPPLIERID", "DEFAULTSUPPLIERNO",
+            "VENDOR", "VENDORID", "VENDORNO", "SUPPLIER", "SUPPLIERID", "SUPPLIERNO",
+            "PERSONID", "PERSONNO",
+        ))
+
+        material_account_name_expr = "NULL"
+        material_account_joins = []
+        if account_col and _table_exists(cur, "GLACCNT"):
+            glaccnt_columns = _get_table_columns(cur, "GLACCNT")
+            account_name_col = _match_column(glaccnt_columns, ("ACCOUNTNAME", "GLACCOUNTNAME", "NAME", "DESCRIPTION"))
+            account_no_col = _match_column(glaccnt_columns, ("GLACCOUNT", "ACCOUNTNO", "GLACCOUNTNO", "CODE"))
+            account_id_col = _match_column(glaccnt_columns, ("GLACCOUNTID", "ACCOUNTID", "ID"))
+            if account_name_col and (account_no_col or account_id_col):
+                join_col = account_id_col if account_col.upper().endswith("ID") and account_id_col else account_no_col
+                material_account_name_expr = f"ga.{_identifier(account_name_col)}"
+                material_account_joins.append(
+                    "LEFT JOIN GLACCNT ga ON CAST(ga.%s AS VARCHAR(255)) = CAST(i.%s AS VARCHAR(255))"
+                    % (_identifier(join_col), _identifier(account_col))
+                )
+
+        material_account_display_expr = f"""
+            COALESCE(
+                NULLIF(TRIM(CAST(({material_account_name_expr}) AS VARCHAR(255))), ''),
+                CASE
+                    WHEN NULLIF(TRIM(COALESCE(c.NAME, '')), '') IS NOT NULL
+                    THEN 'Persediaan ' || TRIM(c.NAME)
+                    ELSE ''
+                END
+            )
+        """
+
+        def item_expr(column, alias="i", fallback="NULL"):
+            return f"{alias}.{_identifier(column)}" if column else fallback
+
+        conditions = [
+            "prd.ITEMNO IS NOT NULL",
+            "prd.WODETID IS NOT NULL",
+            "UPPER(TRIM(COALESCE(rc.NAME, ''))) = 'BARANG JADI'",
+        ]
+        params = []
+        if date_from:
+            conditions.append("pr.RESULTDATE >= ?")
+            params.append(date_from)
+        if date_to:
+            conditions.append("pr.RESULTDATE <= ?")
+            params.append(date_to)
+        if exact_code is not None:
+            if exact_code == "__EMPTY__":
+                conditions.append(f"COALESCE(TRIM(CAST({item_expr(code_product_col)} AS VARCHAR(255))), '') = ''")
+            else:
+                conditions.append(f"UPPER(TRIM(CAST({item_expr(code_product_col)} AS VARCHAR(255)))) = UPPER(?)")
+                params.append(exact_code)
+        elif search:
+            conditions.append(f"LOWER(CAST({item_expr(code_product_col)} AS VARCHAR(255))) CONTAINING LOWER(?)")
+            params.append(search)
+
+        cur.execute(f"""
+            SELECT
+                pr.RESULTDATE,
+                CAST({item_expr(code_product_col)} AS VARCHAR(255)),
+                CAST({item_expr(kbli_col)} AS VARCHAR(255)),
+                CAST({item_expr(_siinas_pick_column(item_columns, ("PRODUCT", "ITEMRESERVED6", "RESERVED6")))} AS VARCHAR(255)),
+                CAST({item_expr(unit2_col)} AS VARCHAR(255)),
+                {item_expr(ratio2_col, fallback='0')},
+                CAST({item_expr(unit3_col)} AS VARCHAR(255)),
+                {item_expr(ratio3_col, fallback='0')},
+                prd.WODETID,
+                COALESCE(prd.QUANTITY, 0),
+                COALESCE(prd.COST, 0),
+                pr.RESULTNO,
+                pr.DESCRIPTION,
+                prd.ITEMNO,
+                prd.UNIT,
+                prd.PORTION,
+                i.ITEMDESCRIPTION,
+                wo.WONO,
+                wo.WODATE,
+                wd.QUANTITY,
+                wd.UNIT,
+                wd.NOJOB,
+                wd.JOBDESCRIPTION
+            FROM PRODRESULT pr
+            JOIN PRODRESULTDET prd ON prd.PRODRESULTID = pr.ID
+            LEFT JOIN ITEM i ON i.ITEMNO = prd.ITEMNO
+            LEFT JOIN ITEMCATEGORY rc ON rc.CATEGORYID = i.CATEGORYID
+            LEFT JOIN WODET wd ON wd.ID = prd.WODETID
+            LEFT JOIN WO wo ON wo.ID = wd.WOID
+            WHERE {' AND '.join(conditions)}
+            ORDER BY pr.RESULTDATE, prd.ID
+        """, params)
+
+        grouped = {}
+        all_wodet_ids = set()
+        for row in cur.fetchall():
+            (
+                result_date, code_product, result_kbli, result_product,
+                result_unit2, result_ratio2, result_unit3, result_ratio3,
+                wodet_id, result_qty, result_unit_cost,
+                result_no, result_description, result_item_no, result_unit,
+                result_portion, result_item_name, work_order_no, work_order_date,
+                work_order_qty, work_order_unit, job_no, job_description,
+            ) = row
+            date_text = str(result_date)[:10] if result_date else ""
+            code_text = str(code_product or "").strip()
+            key = (date_text, code_text)
+            record = grouped.setdefault(key, {
+                "tanggal_gp": date_text,
+                "kode_kategori": code_text,
+                "nilai_produksi_gp": 0.0,
+                "kts_satuan_asli": 0.0,
+                "kts_standar_kgm": 0.0,
+                "nilai_produksi_kgm": 0.0,
+                "nilai_produksi_asli": 0.0,
+                "_wodet_ids": set(),
+                "details": [],
+            })
+            qty = float(result_qty or 0)
+            unit_cost = float(result_unit_cost or 0)
+            record["kts_satuan_asli"] += qty
+            record["nilai_produksi_gp"] += qty * unit_cost
+            target_id = int(wodet_id or 0)
+            if target_id:
+                record["_wodet_ids"].add(target_id)
+                all_wodet_ids.add(target_id)
+            record["details"].append({
+                "no_hasil": str(result_no or "").strip(),
+                "tgl_hasil": date_text,
+                "no_perintah_kerja": str(work_order_no or "").strip(),
+                "tgl_perintah_kerja": str(work_order_date) if work_order_date else "",
+                "wodet_id": target_id,
+                "no_job": str(job_no or "").strip(),
+                "deskripsi_gp": str(result_description or "").replace("\r\n", " ").replace("\n", " ").strip(),
+                "job_description": str(job_description or "").replace("\r\n", " ").replace("\n", " ").strip(),
+                "no_barang_hasil": str(result_item_no or "").strip(),
+                "nama_barang_hasil": str(result_item_name or "").strip(),
+                "kbli": str(result_kbli or "").strip(),
+                "produk_barang_jadi": str(result_product or "").strip(),
+                "unit_2": str(result_unit2 or "").strip(),
+                "rasio_2_barang": float(result_ratio2 or 0),
+                "unit_3": str(result_unit3 or "").strip(),
+                "rasio_3_barang": float(result_ratio3 or 0),
+                "qty_hasil": qty,
+                "unit_hasil": str(result_unit or "").strip(),
+                "unit_cost": unit_cost,
+                "total_cost": qty * unit_cost,
+                "portion": float(result_portion or 0),
+                "qty_perintah_kerja": float(work_order_qty or 0),
+                "unit_perintah_kerja": str(work_order_unit or "").strip(),
+            })
+
+        materials_by_wodet = {}
+        wodet_ids = sorted(all_wodet_ids)
+        for start in range(0, len(wodet_ids), 900):
+            chunk = wodet_ids[start:start + 900]
+            if not chunk:
+                continue
+            cur.execute(f"""
+                SELECT
+                    w.WODETID,
+                    w.ITEMNO,
+                    SUM(COALESCE(w.QUANTITY, 0)),
+                    SUM(
+                        CASE
+                            WHEN COALESCE(w.COSTUNIT, 0) > 0
+                            THEN COALESCE(w.QUANTITY, 0) * COALESCE(w.COSTUNIT, 0)
+                            ELSE COALESCE(w.COST, 0)
+                        END
+                    ),
+                    MAX(w.UNIT),
+                    MAX(i.ITEMDESCRIPTION),
+                    COALESCE((SELECT SUM(h.QUANTITY) FROM ITEMHIST h WHERE h.ITEMNO = w.ITEMNO), 0),
+                    MAX({material_account_display_expr}),
+                    MAX(CAST({item_expr(hs_code_col, fallback="''")} AS VARCHAR(255))),
+                    MAX(CAST({item_expr(kbli_col, fallback="''")} AS VARCHAR(255))),
+                    MAX(i.UNIT1),
+                    MAX({item_expr(unit2_col)}),
+                    MAX({item_expr(unit3_col)}),
+                    MAX({item_expr(ratio2_col, fallback='0')}),
+                    MAX({item_expr(ratio3_col, fallback='0')}),
+                    MAX(CAST({item_expr(supplier_col, fallback="''")} AS VARCHAR(255)))
+                FROM WODETMAT w
+                LEFT JOIN ITEM i ON i.ITEMNO = w.ITEMNO
+                LEFT JOIN ITEMCATEGORY c ON c.CATEGORYID = i.CATEGORYID
+                {' '.join(material_account_joins)}
+                WHERE w.WODETID IN ({_build_in_clause(chunk)})
+                GROUP BY w.WODETID, w.ITEMNO
+            """, chunk)
+            for row in cur.fetchall():
+                target_id = int(row[0] or 0)
+                materials_by_wodet.setdefault(target_id, []).append({
+                    "itemno": str(row[1] or "").strip(),
+                    "qty": float(row[2] or 0),
+                    "value": float(row[3] or 0),
+                    "unit": str(row[4] or "").strip(),
+                    "description": str(row[5] or "").strip(),
+                    "stok_akhir": float(row[6] or 0),
+                    "akun_persediaan": str(row[7] or "").strip(),
+                    "hs_code": str(row[8] or "").strip(),
+                    "kbli": str(row[9] or "").strip(),
+                    "unit1": row[10],
+                    "unit2": row[11],
+                    "unit3": row[12],
+                    "ratio2": float(row[13] or 0),
+                    "ratio3": float(row[14] or 0),
+                    "supplier_ref": str(row[15] or "").strip(),
+                })
+
+        supplier_details = _siinas_resolve_supplier_details(
+            cur,
+            [material.get("supplier_ref") for materials in materials_by_wodet.values() for material in materials],
+        )
+        supplier_details_by_item = _siinas_resolve_latest_supplier_by_item(
+            cur,
+            [material.get("itemno") for materials in materials_by_wodet.values() for material in materials],
+        )
+        material_groups_by_wodet = {}
+        for wodet_id, materials in materials_by_wodet.items():
+            material_groups = material_groups_by_wodet.setdefault(
+                wodet_id,
+                {"material_non_kg": [], "material_kg": []},
+            )
+            for material in materials:
+                supplier_detail = (
+                    supplier_details.get(material.get("supplier_ref"), {})
+                    or supplier_details_by_item.get(material.get("itemno"), {})
+                )
+                qty = material["qty"]
+                value = material["value"]
+                kg_qty = None
+                kg_unit = ""
+                validasi_ratio3 = validasi_satuan3_ratio_by_item.get(material["itemno"])
+                if validasi_ratio3:
+                    kg_qty = qty / validasi_ratio3
+                    kg_unit = _SIINAS_REQUIRED_SATUAN3_UNIT
+
+                material_detail = {
+                    "no_barang": material["itemno"],
+                    "nama_barang": material["description"],
+                    "qty": qty,
+                    "stok_akhir": material["stok_akhir"],
+                    "unit": material["unit"] or str(material["unit1"] or "").strip(),
+                    "nilai": value,
+                    "akun_persediaan": material["akun_persediaan"],
+                    "nama_pemasok": supplier_detail.get("nama_pemasok", material.get("supplier_ref", "")),
+                    "negara_pemasok": supplier_detail.get("negara_pemasok", ""),
+                    "kode_negara": supplier_detail.get("kode_negara", ""),
+                    "hs_code": material["hs_code"],
+                    "kbli": material["kbli"],
+                    "unit1": str(material["unit1"] or "").strip(),
+                    "unit2": str(material["unit2"] or "").strip(),
+                    "unit3": str(material["unit3"] or "").strip(),
+                    "kg_qty": kg_qty,
+                    "kg_unit": kg_unit,
+                    "rasio_3_validasi": validasi_ratio3 or 0,
+                }
+                if kg_qty is not None:
+                    material_groups["material_kg"].append(material_detail)
+                else:
+                    material_groups["material_non_kg"].append(material_detail)
+
+        for record in grouped.values():
+            for wodet_id in record.pop("_wodet_ids"):
+                groups = material_groups_by_wodet.get(wodet_id, {})
+                for material_detail in groups.get("material_non_kg", []):
+                    record["nilai_produksi_asli"] += float(material_detail.get("nilai") or 0)
+                for material_detail in groups.get("material_kg", []):
+                    value = float(material_detail.get("nilai") or 0)
+                    record["nilai_produksi_asli"] += value
+                    record["nilai_produksi_kgm"] += value
+                    record["kts_standar_kgm"] += float(material_detail.get("kg_qty") or 0)
+
+        for record in grouped.values():
+            for detail in record.get("details") or []:
+                groups = material_groups_by_wodet.get(detail.get("wodet_id"), {})
+                detail["material_non_kg"] = groups.get("material_non_kg", [])
+                detail["material_kg"] = groups.get("material_kg", [])
+
+        date_rows = sorted(grouped.values(), key=lambda row: (row["kode_kategori"], row["tanggal_gp"]), reverse=True)
+        for row in date_rows:
+            row["detail_count"] = len(row.get("details") or [])
+
+        category_grouped = {}
+        for date_row in date_rows:
+            code = str(date_row.get("kode_kategori") or "").strip()
+            category = category_grouped.setdefault(code, {
+                "kode_kategori": code,
+                "tanggal_count": 0,
+                "detail_count": 0,
+                "nilai_produksi_gp": 0.0,
+                "kts_satuan_asli": 0.0,
+                "kts_standar_kgm": 0.0,
+                "nilai_produksi_kgm": 0.0,
+                "nilai_produksi_asli": 0.0,
+                "dates": [],
+            })
+            category["dates"].append(date_row)
+            category["tanggal_count"] += 1
+            category["detail_count"] += int(date_row.get("detail_count") or 0)
+            for key in (
+                "nilai_produksi_gp", "kts_satuan_asli", "kts_standar_kgm",
+                "nilai_produksi_kgm", "nilai_produksi_asli",
+            ):
+                category[key] += float(date_row.get(key) or 0)
+
+        rows = sorted(
+            category_grouped.values(),
+            key=lambda row: (row["kode_kategori"] or "", row["nilai_produksi_gp"]),
+            reverse=True,
+        )
+        summary = {
+            key: sum(float(row.get(key) or 0) for row in rows)
+            for key in (
+                "nilai_produksi_gp", "kts_satuan_asli", "kts_standar_kgm",
+                "nilai_produksi_kgm", "nilai_produksi_asli",
+            )
+        }
+        total = len(rows)
+        return {"data": rows[offset:offset + limit], "total": total, "summary": summary}
+    finally:
+        con.close()
+
+
+def _get_siinas_monitoring_report(search="", offset=0, limit=50, date_from="", date_to=""):
+    """Ringkasan Kode Kategori -> Tanggal Produksi dengan KGM dari Validasi Satuan 3."""
+    validasi_satuan3_ratio_by_item = _siinas_validasi_satuan3_ratio_map()
+    con = fdb.connect(**DB_CONFIG)
+    cur = con.cursor()
+    try:
+        item_columns = _get_table_columns(cur, "ITEM")
+        code_product_col = _siinas_pick_column(item_columns, ("CODEPRODUCT", "ITEMRESERVED1", "RESERVED1"))
+
+        def item_expr(column, alias="i", fallback="NULL"):
+            return f"{alias}.{_identifier(column)}" if column else fallback
+
+        code_expr = f"COALESCE(TRIM(CAST({item_expr(code_product_col)} AS VARCHAR(255))), '')"
+        conditions = [
+            "prd.ITEMNO IS NOT NULL",
+            "prd.WODETID IS NOT NULL",
+            "UPPER(TRIM(COALESCE(rc.NAME, ''))) = 'BARANG JADI'",
+        ]
+        params = []
+        if date_from:
+            conditions.append("pr.RESULTDATE >= ?")
+            params.append(date_from)
+        if date_to:
+            conditions.append("pr.RESULTDATE <= ?")
+            params.append(date_to)
+        if search:
+            conditions.append(f"LOWER(CAST({item_expr(code_product_col)} AS VARCHAR(255))) CONTAINING LOWER(?)")
+            params.append(search)
+
+        cur.execute(f"""
+            SELECT
+                pr.RESULTDATE,
+                {code_expr},
+                prd.WODETID,
+                COALESCE(prd.QUANTITY, 0),
+                COALESCE(prd.COST, 0)
+            FROM PRODRESULT pr
+            JOIN PRODRESULTDET prd ON prd.PRODRESULTID = pr.ID
+            LEFT JOIN ITEM i ON i.ITEMNO = prd.ITEMNO
+            LEFT JOIN ITEMCATEGORY rc ON rc.CATEGORYID = i.CATEGORYID
+            WHERE {' AND '.join(conditions)}
+            ORDER BY pr.RESULTDATE DESC, {code_expr}
+        """, params)
+
+        grouped = {}
+        all_wodet_ids = set()
+        for result_date, code_product, wodet_id, qty, unit_cost in cur.fetchall():
+            date_text = str(result_date)[:10] if result_date else ""
+            code_text = str(code_product or "").strip()
+            key = (date_text, code_text)
+            date_row = grouped.setdefault(key, {
+                "tanggal_gp": date_text,
+                "kode_kategori": code_text,
+                "detail_count": 0,
+                "nilai_produksi_gp": 0.0,
+                "kts_satuan_asli": 0.0,
+                "kts_standar_kgm": 0.0,
+                "nilai_produksi_kgm": 0.0,
+                "nilai_produksi_asli": 0.0,
+                "details": [],
+                "_wodet_ids": set(),
+            })
+            qty_value = float(qty or 0)
+            cost_value = float(unit_cost or 0)
+            date_row["detail_count"] += 1
+            date_row["kts_satuan_asli"] += qty_value
+            date_row["nilai_produksi_gp"] += qty_value * cost_value
+            target_id = int(wodet_id or 0)
+            if target_id:
+                date_row["_wodet_ids"].add(target_id)
+                all_wodet_ids.add(target_id)
+
+        material_totals_by_wodet = {}
+        wodet_ids = sorted(all_wodet_ids)
+        for wodet_start in range(0, len(wodet_ids), 300):
+            wodet_chunk = wodet_ids[wodet_start:wodet_start + 300]
+            if not wodet_chunk:
+                continue
+            cur.execute(f"""
+                SELECT
+                    w.WODETID,
+                    w.ITEMNO,
+                    SUM(COALESCE(w.QUANTITY, 0)),
+                    SUM(
+                        CASE
+                            WHEN COALESCE(w.COSTUNIT, 0) > 0
+                            THEN COALESCE(w.QUANTITY, 0) * COALESCE(w.COSTUNIT, 0)
+                            ELSE COALESCE(w.COST, 0)
+                        END
+                    )
+                FROM WODETMAT w
+                WHERE w.WODETID IN ({_build_in_clause(wodet_chunk)})
+                GROUP BY w.WODETID, w.ITEMNO
+            """, wodet_chunk)
+            for material_wodet_id, item_no, material_qty, material_value in cur.fetchall():
+                totals = material_totals_by_wodet.setdefault(
+                    int(material_wodet_id or 0),
+                    {"kts_standar_kgm": 0.0, "nilai_produksi_kgm": 0.0, "nilai_produksi_asli": 0.0},
+                )
+                value = float(material_value or 0)
+                totals["nilai_produksi_asli"] += value
+                item_text = str(item_no or "").strip()
+                ratio3 = validasi_satuan3_ratio_by_item.get(item_text)
+                if ratio3:
+                    totals["kts_standar_kgm"] += float(material_qty or 0) / ratio3
+                    totals["nilai_produksi_kgm"] += value
+
+        for date_row in grouped.values():
+            for wodet_id in date_row.pop("_wodet_ids"):
+                totals = material_totals_by_wodet.get(wodet_id, {})
+                date_row["kts_standar_kgm"] += float(totals.get("kts_standar_kgm") or 0)
+                date_row["nilai_produksi_kgm"] += float(totals.get("nilai_produksi_kgm") or 0)
+                date_row["nilai_produksi_asli"] += float(totals.get("nilai_produksi_asli") or 0)
+
+        category_grouped = {}
+        for date_row in sorted(grouped.values(), key=lambda row: (row["kode_kategori"], row["tanggal_gp"]), reverse=True):
+            code_text = str(date_row.get("kode_kategori") or "").strip()
+            category = category_grouped.setdefault(code_text, {
+                "kode_kategori": code_text,
+                "tanggal_count": 0,
+                "detail_count": 0,
+                "nilai_produksi_gp": 0.0,
+                "kts_satuan_asli": 0.0,
+                "kts_standar_kgm": 0.0,
+                "nilai_produksi_kgm": 0.0,
+                "nilai_produksi_asli": 0.0,
+                "dates": [],
+            })
+            category["dates"].append(date_row)
+            category["tanggal_count"] += 1
+            category["detail_count"] += date_row["detail_count"]
+            for key in (
+                "nilai_produksi_gp", "kts_satuan_asli", "kts_standar_kgm",
+                "nilai_produksi_kgm", "nilai_produksi_asli",
+            ):
+                category[key] += float(date_row.get(key) or 0)
+
+        rows = sorted(
+            category_grouped.values(),
+            key=lambda row: (row["kode_kategori"] or "", row["nilai_produksi_gp"]),
+            reverse=True,
+        )
+        summary = {
+            key: sum(float(row.get(key) or 0) for row in rows)
+            for key in (
+                "nilai_produksi_gp", "kts_satuan_asli", "kts_standar_kgm",
+                "nilai_produksi_kgm", "nilai_produksi_asli",
+            )
+        }
+        total = len(rows)
+        return {"data": rows[offset:offset + limit], "total": total, "summary": summary}
+    finally:
+        con.close()
+
+
+def _get_siinas_monitoring_details(kode_kategori="", tanggal_gp=""):
+    exact_code = "__EMPTY__" if not str(kode_kategori or "").strip() else str(kode_kategori or "").strip()
+    result = _get_siinas_monitoring_report_full(
+        offset=0,
+        limit=100000,
+        date_from=tanggal_gp,
+        date_to=tanggal_gp,
+        exact_code=exact_code,
+    )
+    for category in result.get("data") or []:
+        for date_row in category.get("dates") or []:
+            if date_row.get("tanggal_gp") == tanggal_gp:
+                return {"data": date_row.get("details") or []}
+    return {"data": []}
+
+
+@app.route("/api/siinas/monitoring-report")
+@jwt_required()
+def api_siinas_monitoring_report():
+    if not check_permission("siinas"):
+        return jsonify({"message": "Akses ditolak"}), 403
+    try:
+        return jsonify(_get_siinas_monitoring_report(
+            search=request.args.get("search", ""),
+            offset=int(request.args.get("offset", 0)),
+            limit=min(max(int(request.args.get("limit", 50)), 1), 100000),
+            date_from=request.args.get("date_from", ""),
+            date_to=request.args.get("date_to", ""),
+        ))
+    except Exception as e:
+        print(f"Error api_siinas_monitoring_report: {e}")
+        return jsonify({"data": [], "total": 0, "summary": {}, "error": str(e)}), 500
+
+
+@app.route("/api/siinas/monitoring-report/details")
+@jwt_required()
+def api_siinas_monitoring_details():
+    if not check_permission("siinas"):
+        return jsonify({"message": "Akses ditolak"}), 403
+    try:
+        return jsonify(_get_siinas_monitoring_details(
+            kode_kategori=request.args.get("kode_kategori", ""),
+            tanggal_gp=request.args.get("tanggal_gp", ""),
+        ))
+    except Exception as e:
+        print(f"Error api_siinas_monitoring_details: {e}")
+        return jsonify({"data": [], "error": str(e)}), 500
 
 @app.route("/api/dashboard-summary")
 @jwt_required()
