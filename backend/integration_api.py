@@ -12,7 +12,7 @@ from flask_jwt_extended import create_access_token
 
 
 API_PREFIX = "/api/integration/v1"
-COMMON_PARAMS = {"offset", "limit"}
+COMMON_PARAMS = {"offset", "limit", "created_from", "created_to"}
 ALLOWED_PARAMS = {
     "spk": {"search", "date_from", "date_to", "status"},
     "spk-simple": {"search", "date_from", "date_to", "status"},
@@ -163,6 +163,46 @@ def _pagination():
         )
 
 
+def _parse_created_date(value):
+    value = str(value or "").strip()
+    if not value:
+        return None
+    for fmt in ("%Y-%m-%d", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return datetime.strptime(value[:len(fmt)], fmt)
+        except ValueError:
+            continue
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).replace(tzinfo=None)
+    except ValueError:
+        return None
+
+
+def _created_at_filters():
+    created_from = _parse_created_date(request.args.get("created_from", ""))
+    created_to = _parse_created_date(request.args.get("created_to", ""))
+    if created_to and len(request.args.get("created_to", "")) <= 10:
+        created_to = created_to.replace(hour=23, minute=59, second=59, microsecond=999999)
+    return created_from, created_to
+
+
+def _filter_created_at_rows(rows):
+    created_from, created_to = _created_at_filters()
+    if not created_from and not created_to:
+        return rows
+    filtered = []
+    for row in rows:
+        created_at = _parse_created_date(row.get("created_at") if isinstance(row, dict) else "")
+        if not created_at:
+            continue
+        if created_from and created_at < created_from:
+            continue
+        if created_to and created_at > created_to:
+            continue
+        filtered.append(row)
+    return filtered
+
+
 def _internal_get(app, path, query_params):
     token = create_access_token(
         identity="integration-calculator",
@@ -233,12 +273,14 @@ def _error_response(resource, status_code, upstream):
 
 def _success_response(resource, upstream, offset, limit):
     if isinstance(upstream, list):
-        rows = upstream
+        rows = _filter_created_at_rows(upstream)
         total = len(rows)
         extra = {}
     else:
-        rows = upstream.get("data", [])
-        total = int(upstream.get("total", len(rows)) or 0)
+        original_rows = upstream.get("data", [])
+        rows = _filter_created_at_rows(original_rows)
+        has_created_filter = bool(request.args.get("created_from") or request.args.get("created_to"))
+        total = len(rows) if has_created_filter else int(upstream.get("total", len(rows)) or 0)
         extra = {
             key: value
             for key, value in upstream.items()
