@@ -4971,7 +4971,7 @@ def _fetch_fifo_cost_map(cur, item_nos):
                         h.DESCRIPTION
                     FROM ITEMHIST h
                     WHERE h.ITEMNO IN ({_build_in_clause(chunk)})
-                      AND COALESCE(h.QUANTITY, 0) > 0
+                      AND h.QUANTITY > 0
                     ORDER BY h.ITEMNO, h.TXDATE, h.ITEMHISTID
                 """, chunk)
                 incoming_rows.extend(cur.fetchall())
@@ -5109,7 +5109,7 @@ def _get_fifo_search_data(cur, search="", offset=0, limit=50, include_total=Fals
         search_sql = """AND (
             LOWER(i.ITEMNO) CONTAINING LOWER(?)
             OR LOWER(i.ITEMDESCRIPTION) CONTAINING LOWER(?)
-            OR LOWER(COALESCE(c.NAME, '')) CONTAINING LOWER(?)
+            OR LOWER(c.NAME) CONTAINING LOWER(?)
         )"""
         params.extend([search, search, search])
 
@@ -5124,10 +5124,10 @@ def _get_fifo_search_data(cur, search="", offset=0, limit=50, include_total=Fals
             {unit_exprs["ratio2"]},
             {unit_exprs["ratio3"]}
         FROM ITEM i
-        LEFT JOIN ITEMCATEGORY c ON c.CATEGORYID = i.CATEGORYID
-        WHERE COALESCE(i.ITEMTYPE, 0) = 0
-          AND COALESCE(i.SUSPENDED, 0) = 0
-          AND COALESCE(c.NAME, '') IN ({_build_in_clause(FIFO_CATEGORIES)})
+        JOIN ITEMCATEGORY c ON c.CATEGORYID = i.CATEGORYID
+        WHERE (i.ITEMTYPE = 0 OR i.ITEMTYPE IS NULL)
+          AND (i.SUSPENDED = 0 OR i.SUSPENDED IS NULL)
+          AND c.NAME IN ({_build_in_clause(FIFO_CATEGORIES)})
           {search_sql}
         ORDER BY c.NAME, i.ITEMNO
     """, params)
@@ -5186,10 +5186,10 @@ def _get_fifo_page_data(cur, offset=0, limit=50, include_total=False):
                 {unit_exprs["ratio2"]},
                 {unit_exprs["ratio3"]}
             FROM ITEM i
-            LEFT JOIN ITEMCATEGORY c ON c.CATEGORYID = i.CATEGORYID
-            WHERE COALESCE(i.ITEMTYPE, 0) = 0
-              AND COALESCE(i.SUSPENDED, 0) = 0
-              AND COALESCE(c.NAME, '') IN ({_build_in_clause(FIFO_CATEGORIES)})
+            JOIN ITEMCATEGORY c ON c.CATEGORYID = i.CATEGORYID
+            WHERE (i.ITEMTYPE = 0 OR i.ITEMTYPE IS NULL)
+              AND (i.SUSPENDED = 0 OR i.SUSPENDED IS NULL)
+              AND c.NAME IN ({_build_in_clause(FIFO_CATEGORIES)})
             ORDER BY c.NAME, i.ITEMNO
         """, [candidate_limit, candidate_skip] + list(FIFO_CATEGORIES))
         candidate_rows = cur.fetchall()
