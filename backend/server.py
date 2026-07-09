@@ -5993,27 +5993,30 @@ def _fetch_fifo_cost_map(cur, item_nos):
         except Exception as fifo_error:
             print(f"Error fifo stock valuation batch: {fifo_error}")
 
-    for item_no in [item for item in items if item not in result]:
-        cur.execute("""
-            SELECT FIRST 1 TXDATE, ITEMHISTID,
-                CASE
-                    WHEN COALESCE(QUANTITY, 0) < 0 AND COALESCE(QUANTITY, 0) <> 0
-                    THEN ABS(COALESCE(NULLIF(COST, 0), NULLIF(NEWCOST, 0), 0) / QUANTITY)
-                    ELSE COALESCE(NULLIF(COST, 0), NULLIF(NEWCOST, 0), 0)
-                END
-            FROM ITEMHIST
-            WHERE ITEMNO = ?
-              AND COALESCE(NULLIF(COST, 0), NULLIF(NEWCOST, 0), 0) > 0
-            ORDER BY TXDATE DESC, ITEMHISTID DESC
-        """, [item_no])
-        row = cur.fetchone()
-        if row:
-            _txdate, _itemhist_id, unit_cost = row
-            result[item_no] = {
-                "harga_fifo": float(unit_cost or 0),
-                "nilai_stock": None,
-                "sumber_harga": "Riwayat biaya terakhir",
-            }
+    fallback_items = [item for item in items if item not in result]
+    if fallback_items:
+        for start in range(0, len(fallback_items), 900):
+            chunk = fallback_items[start:start + 900]
+            cur.execute(f"""
+                SELECT ITEMNO, TXDATE, ITEMHISTID,
+                    CASE
+                        WHEN COALESCE(QUANTITY, 0) < 0 AND COALESCE(QUANTITY, 0) <> 0
+                        THEN ABS(COALESCE(NULLIF(COST, 0), NULLIF(NEWCOST, 0), 0) / QUANTITY)
+                        ELSE COALESCE(NULLIF(COST, 0), NULLIF(NEWCOST, 0), 0)
+                    END
+                FROM ITEMHIST
+                WHERE ITEMNO IN ({_build_in_clause(chunk)})
+                  AND COALESCE(NULLIF(COST, 0), NULLIF(NEWCOST, 0), 0) > 0
+                ORDER BY ITEMNO, TXDATE DESC, ITEMHISTID DESC
+            """, chunk)
+            for item_no, _txdate, _itemhist_id, unit_cost in cur.fetchall():
+                key = str(item_no or "").strip()
+                if key not in result:
+                    result[key] = {
+                        "harga_fifo": float(unit_cost or 0),
+                        "nilai_stock": None,
+                        "sumber_harga": "Riwayat biaya terakhir",
+                    }
     return result
 
 
