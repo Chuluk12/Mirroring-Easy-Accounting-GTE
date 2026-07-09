@@ -12,7 +12,10 @@ from flask_jwt_extended import create_access_token
 
 
 API_PREFIX = "/api/integration/v1"
-COMMON_PARAMS = {"offset", "limit", "created_from", "created_to"}
+COMMON_PARAMS = {
+    "offset", "limit", "search", "columns", "sort_by", "sort_order",
+    "date_from", "date_to", "created_from", "created_to",
+}
 ALLOWED_PARAMS = {
     "spk": {"search", "date_from", "date_to", "status"},
     "spk-simple": {"search", "date_from", "date_to", "status"},
@@ -203,6 +206,113 @@ def _filter_created_at_rows(rows):
     return filtered
 
 
+def _date_filters():
+    date_from = _parse_created_date(request.args.get("date_from", ""))
+    date_to = _parse_created_date(request.args.get("date_to", ""))
+    if date_to and len(request.args.get("date_to", "")) <= 10:
+        date_to = date_to.replace(hour=23, minute=59, second=59, microsecond=999999)
+    return date_from, date_to
+
+
+def _row_date_value(row):
+    if not isinstance(row, dict):
+        return None
+    preferred = (
+        "tanggal", "tgl", "date", "created_at", "tgl_faktur", "tanggal_gp",
+        "tgl_hasil", "tgl_pengiriman", "tgl_pesanan", "tgl_pembelian",
+    )
+    keys = list(preferred) + [
+        key for key in row
+        if any(token in str(key).lower() for token in ("date", "tgl", "tanggal"))
+    ]
+    for key in keys:
+        if key in row:
+            parsed = _parse_created_date(row.get(key))
+            if parsed:
+                return parsed
+    return None
+
+
+def _filter_date_rows(rows, resource):
+    if "date_from" in ALLOWED_PARAMS[resource] or "date_to" in ALLOWED_PARAMS[resource]:
+        return rows
+    date_from, date_to = _date_filters()
+    if not date_from and not date_to:
+        return rows
+    filtered = []
+    for row in rows:
+        row_date = _row_date_value(row)
+        if not row_date:
+            filtered.append(row)
+            continue
+        if date_from and row_date < date_from:
+            continue
+        if date_to and row_date > date_to:
+            continue
+        filtered.append(row)
+    return filtered
+
+
+def _split_csv_param(name):
+    return [
+        item.strip()
+        for value in request.args.getlist(name)
+        for item in str(value or "").split(",")
+        if item.strip()
+    ]
+
+
+def _filter_search_rows(rows):
+    search = str(request.args.get("search", "") or "").strip().lower()
+    if not search:
+        return rows
+    filtered = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if any(search in str(value or "").lower() for value in row.values()):
+            filtered.append(row)
+    return filtered
+
+
+def _sort_rows(rows):
+    sort_by = str(request.args.get("sort_by", "") or "").strip()
+    if not sort_by:
+        return rows
+    reverse = str(request.args.get("sort_order", "") or "").strip().lower() in {"desc", "descend", "descending"}
+
+    def sort_value(row):
+        value = row.get(sort_by) if isinstance(row, dict) else ""
+        if isinstance(value, (int, float)):
+            return (0, value)
+        text = str(value or "").strip()
+        try:
+            return (0, float(text.replace(",", ".")))
+        except ValueError:
+            return (1, text.lower())
+
+    return sorted(rows, key=sort_value, reverse=reverse)
+
+
+def _select_columns(rows):
+    columns = _split_csv_param("columns")
+    if not columns:
+        return rows
+    return [
+        {key: row.get(key) for key in columns if isinstance(row, dict) and key in row}
+        for row in rows
+    ]
+
+
+def _shape_rows(rows, resource, select_columns=True):
+    shaped = _filter_created_at_rows(rows)
+    shaped = _filter_date_rows(shaped, resource)
+    if "search" not in ALLOWED_PARAMS[resource]:
+        shaped = _filter_search_rows(shaped)
+    shaped = _sort_rows(shaped)
+    return _select_columns(shaped) if select_columns else shaped
+
+
 def _internal_get(app, path, query_params):
     token = create_access_token(
         identity="integration-calculator",
@@ -242,8 +352,17 @@ def _internal_post(app, path, json_data):
 def _query_params(resource, offset, limit):
     params = []
     for key in sorted(ALLOWED_PARAMS[resource]):
+        if key in COMMON_PARAMS:
+            continue
         for value in request.args.getlist(key):
             params.append((key, value))
+    if "search" in ALLOWED_PARAMS[resource]:
+        for value in request.args.getlist("search"):
+            params.append(("search", value))
+    for key in ("date_from", "date_to"):
+        if key in ALLOWED_PARAMS[resource]:
+            for value in request.args.getlist(key):
+                params.append((key, value))
     params.extend([("offset", offset), ("limit", limit)])
     if resource == "stock":
         params.append(("include_total", "1"))
@@ -273,14 +392,21 @@ def _error_response(resource, status_code, upstream):
 
 def _success_response(resource, upstream, offset, limit):
     if isinstance(upstream, list):
-        rows = _filter_created_at_rows(upstream)
+        shaped_rows = _shape_rows(upstream, resource, select_columns=False)
+        rows = _select_columns(shaped_rows)
         total = len(rows)
         extra = {}
     else:
         original_rows = upstream.get("data", [])
-        rows = _filter_created_at_rows(original_rows)
-        has_created_filter = bool(request.args.get("created_from") or request.args.get("created_to"))
-        total = len(rows) if has_created_filter else int(upstream.get("total", len(rows)) or 0)
+        shaped_rows = _shape_rows(original_rows, resource, select_columns=False)
+        rows = _select_columns(shaped_rows)
+        filtered_locally = bool(
+            request.args.get("created_from")
+            or request.args.get("created_to")
+            or ((request.args.get("date_from") or request.args.get("date_to")) and "date_from" not in ALLOWED_PARAMS[resource])
+            or (request.args.get("search") and "search" not in ALLOWED_PARAMS[resource])
+        )
+        total = len(shaped_rows) if filtered_locally else int(upstream.get("total", len(original_rows)) or 0)
         extra = {
             key: value
             for key, value in upstream.items()
