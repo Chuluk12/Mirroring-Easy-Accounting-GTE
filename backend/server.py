@@ -5993,30 +5993,27 @@ def _fetch_fifo_cost_map(cur, item_nos):
         except Exception as fifo_error:
             print(f"Error fifo stock valuation batch: {fifo_error}")
 
-    fallback_items = [item for item in items if item not in result]
-    if fallback_items:
-        for start in range(0, len(fallback_items), 900):
-            chunk = fallback_items[start:start + 900]
-            cur.execute(f"""
-                SELECT ITEMNO, TXDATE, ITEMHISTID,
-                    CASE
-                        WHEN COALESCE(QUANTITY, 0) < 0 AND COALESCE(QUANTITY, 0) <> 0
-                        THEN ABS(COALESCE(NULLIF(COST, 0), NULLIF(NEWCOST, 0), 0) / QUANTITY)
-                        ELSE COALESCE(NULLIF(COST, 0), NULLIF(NEWCOST, 0), 0)
-                    END
-                FROM ITEMHIST
-                WHERE ITEMNO IN ({_build_in_clause(chunk)})
-                  AND COALESCE(NULLIF(COST, 0), NULLIF(NEWCOST, 0), 0) > 0
-                ORDER BY ITEMNO, TXDATE DESC, ITEMHISTID DESC
-            """, chunk)
-            for item_no, _txdate, _itemhist_id, unit_cost in cur.fetchall():
-                key = str(item_no or "").strip()
-                if key not in result:
-                    result[key] = {
-                        "harga_fifo": float(unit_cost or 0),
-                        "nilai_stock": None,
-                        "sumber_harga": "Riwayat biaya terakhir",
-                    }
+    for item_no in [item for item in items if item not in result]:
+        cur.execute("""
+            SELECT FIRST 1 TXDATE, ITEMHISTID,
+                CASE
+                    WHEN COALESCE(QUANTITY, 0) < 0 AND COALESCE(QUANTITY, 0) <> 0
+                    THEN ABS(COALESCE(NULLIF(COST, 0), NULLIF(NEWCOST, 0), 0) / QUANTITY)
+                    ELSE COALESCE(NULLIF(COST, 0), NULLIF(NEWCOST, 0), 0)
+                END
+            FROM ITEMHIST
+            WHERE ITEMNO = ?
+              AND COALESCE(NULLIF(COST, 0), NULLIF(NEWCOST, 0), 0) > 0
+            ORDER BY TXDATE DESC, ITEMHISTID DESC
+        """, [item_no])
+        row = cur.fetchone()
+        if row:
+            _txdate, _itemhist_id, unit_cost = row
+            result[item_no] = {
+                "harga_fifo": float(unit_cost or 0),
+                "nilai_stock": None,
+                "sumber_harga": "Riwayat biaya terakhir",
+            }
     return result
 
 
@@ -6154,11 +6151,76 @@ def _get_fifo_search_data(cur, search="", offset=0, limit=50, include_total=Fals
     return data
 
 
+def _get_fifo_page_data(cur, offset=0, limit=50, include_total=False):
+    unit_exprs = _fifo_item_unit_exprs(cur)
+    target_count = offset + limit
+    collected = []
+    candidate_skip = 0
+    candidate_limit = max(min(limit * 3, 150), 50)
+    scanned_all = False
+
+    while len(collected) < target_count:
+        cur.execute(f"""
+            SELECT FIRST ? SKIP ?
+                i.ITEMNO,
+                i.ITEMDESCRIPTION,
+                c.NAME,
+                i.UNIT1,
+                {unit_exprs["unit2"]},
+                {unit_exprs["unit3"]},
+                {unit_exprs["ratio2"]},
+                {unit_exprs["ratio3"]}
+            FROM ITEM i
+            JOIN ITEMCATEGORY c ON c.CATEGORYID = i.CATEGORYID
+            WHERE (i.ITEMTYPE = 0 OR i.ITEMTYPE IS NULL)
+              AND (i.SUSPENDED = 0 OR i.SUSPENDED IS NULL)
+              AND c.NAME IN ({_build_in_clause(FIFO_CATEGORIES)})
+            ORDER BY c.NAME, i.ITEMNO
+        """, [candidate_limit, candidate_skip] + list(FIFO_CATEGORIES))
+        candidate_rows = cur.fetchall()
+        if not candidate_rows:
+            scanned_all = True
+            break
+
+        stock_by_item = _fifo_fetch_stock_by_item(cur, [row[0] for row in candidate_rows])
+        for row in candidate_rows:
+            item_no = str(row[0] or "").strip()
+            stock_qty = float(stock_by_item.get(item_no, 0) or 0)
+            if stock_qty <= 0:
+                continue
+            collected.append((
+                row[0], row[1], row[2], row[3], stock_qty,
+                row[4], row[5], row[6], row[7],
+            ))
+            if len(collected) >= target_count:
+                break
+        candidate_skip += candidate_limit
+
+    page_rows = collected[offset:offset + limit]
+    data = _build_fifo_rows(page_rows, _fetch_fifo_cost_map(cur, [row[0] for row in page_rows]))
+    has_next = not scanned_all or len(collected) > offset + len(page_rows)
+    categories, total_items = _get_fifo_summary_counts(cur)
+    total_estimate = total_items or (len(collected) if scanned_all else max(offset + len(page_rows) + (1 if has_next else 0), len(collected)))
+    summary = {
+        "total_items": total_estimate,
+        "total_stock_value": round(sum(float(row.get("nilai_stock") or 0) for row in data), 2),
+        "categories": categories,
+    }
+    if include_total:
+        return {"data": data, "total": total_estimate, "summary": summary}
+    return data
+
+
 def get_fifo_data(search="", offset=0, limit=50, include_total=False):
     try:
         con = fdb.connect(**DB_CONFIG)
         cur = con.cursor()
-        result = _get_fifo_search_data(cur, str(search or "").strip() or None, offset, limit, include_total)
+        if str(search or "").strip():
+            result = _get_fifo_search_data(cur, search, offset, limit, include_total)
+            con.close()
+            return result
+
+        result = _get_fifo_page_data(cur, offset, limit, include_total)
         con.close()
         return result
     except Exception as e:
