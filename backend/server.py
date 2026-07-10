@@ -6048,36 +6048,15 @@ def _build_fifo_rows(rows, cost_by_item):
     return data
 
 
-def _fifo_fetch_stock_by_item(cur, item_nos):
-    result = {}
-    items = sorted({str(item or "").strip() for item in item_nos if str(item or "").strip()})
-    for start in range(0, len(items), 900):
-        chunk = items[start:start + 900]
-        cur.execute(f"""
-            SELECT ITEMNO, SUM(QUANTITY)
-            FROM ITEMHIST
-            WHERE ITEMNO IN ({_build_in_clause(chunk)})
-            GROUP BY ITEMNO
-        """, chunk)
-        for item_no, stock_qty in cur.fetchall():
-            result[str(item_no or "").strip()] = float(stock_qty or 0)
-    return result
-
-
 def _get_fifo_summary_counts(cur):
     cur.execute(f"""
         SELECT COALESCE(c.NAME, ''), COUNT(*)
-        FROM (
-            SELECT ITEMNO, SUM(QUANTITY) AS STOCK_QTY
-            FROM ITEMHIST
-            GROUP BY ITEMNO
-            HAVING SUM(QUANTITY) > 0
-        ) s
-        JOIN ITEM i ON i.ITEMNO = s.ITEMNO
+        FROM ITEM i
         LEFT JOIN ITEMCATEGORY c ON c.CATEGORYID = i.CATEGORYID
         WHERE COALESCE(i.ITEMTYPE, 0) = 0
           AND COALESCE(i.SUSPENDED, 0) = 0
           AND COALESCE(c.NAME, '') IN ({_build_in_clause(FIFO_CATEGORIES)})
+          AND COALESCE((SELECT SUM(QUANTITY) FROM ITEMHIST h WHERE h.ITEMNO = i.ITEMNO), 0) > 0
         GROUP BY c.NAME
         ORDER BY c.NAME
     """, list(FIFO_CATEGORIES))
@@ -6096,7 +6075,7 @@ def _get_fifo_search_data(cur, search="", offset=0, limit=50, include_total=Fals
         search_sql = """AND (
             LOWER(i.ITEMNO) CONTAINING LOWER(?)
             OR LOWER(i.ITEMDESCRIPTION) CONTAINING LOWER(?)
-            OR LOWER(c.NAME) CONTAINING LOWER(?)
+            OR LOWER(COALESCE(c.NAME, '')) CONTAINING LOWER(?)
         )"""
         params.extend([search, search, search])
 
@@ -6106,38 +6085,32 @@ def _get_fifo_search_data(cur, search="", offset=0, limit=50, include_total=Fals
             i.ITEMDESCRIPTION,
             c.NAME,
             i.UNIT1,
+            COALESCE((SELECT SUM(h.QUANTITY) FROM ITEMHIST h WHERE h.ITEMNO = i.ITEMNO), 0),
             {unit_exprs["unit2"]},
             {unit_exprs["unit3"]},
             {unit_exprs["ratio2"]},
             {unit_exprs["ratio3"]}
         FROM ITEM i
-        JOIN ITEMCATEGORY c ON c.CATEGORYID = i.CATEGORYID
-        WHERE (i.ITEMTYPE = 0 OR i.ITEMTYPE IS NULL)
-          AND (i.SUSPENDED = 0 OR i.SUSPENDED IS NULL)
-          AND c.NAME IN ({_build_in_clause(FIFO_CATEGORIES)})
+        LEFT JOIN ITEMCATEGORY c ON c.CATEGORYID = i.CATEGORYID
+        WHERE COALESCE(i.ITEMTYPE, 0) = 0
+          AND COALESCE(i.SUSPENDED, 0) = 0
+          AND COALESCE(c.NAME, '') IN ({_build_in_clause(FIFO_CATEGORIES)})
+          AND COALESCE((SELECT SUM(QUANTITY) FROM ITEMHIST h WHERE h.ITEMNO = i.ITEMNO), 0) > 0
           {search_sql}
         ORDER BY c.NAME, i.ITEMNO
     """, params)
     candidate_rows = cur.fetchall()
-    stock_by_item = _fifo_fetch_stock_by_item(cur, [row[0] for row in candidate_rows])
-    rows = []
-    category_counts = {}
-    for row in candidate_rows:
-        item_no = str(row[0] or "").strip()
-        stock_qty = float(stock_by_item.get(item_no, 0) or 0)
-        if stock_qty <= 0:
-            continue
-        category = str(row[2] or "").strip()
-        category_counts[category] = category_counts.get(category, 0) + 1
-        rows.append((
-            row[0], row[1], row[2], row[3], stock_qty,
-            row[4], row[5], row[6], row[7],
-        ))
-
-    total = len(rows)
-    page_rows = rows[offset:offset + limit]
+    
+    total = len(candidate_rows)
+    page_rows = candidate_rows[offset:offset + limit]
     data = _build_fifo_rows(page_rows, _fetch_fifo_cost_map(cur, [row[0] for row in page_rows]))
+    
     if include_total:
+        category_counts = {}
+        for row in candidate_rows:
+            category = str(row[2] or "").strip()
+            category_counts[category] = category_counts.get(category, 0) + 1
+            
         return {
             "data": data,
             "total": total,
@@ -6155,62 +6128,39 @@ def _get_fifo_search_data(cur, search="", offset=0, limit=50, include_total=Fals
 
 def _get_fifo_page_data(cur, offset=0, limit=50, include_total=False):
     unit_exprs = _fifo_item_unit_exprs(cur)
-    target_count = offset + limit
-    collected = []
-    candidate_skip = 0
-    # Besarkan batch limit agar tidak perlu nge-loop banyak kali untuk offset besar
-    candidate_limit = max(target_count * 2, 500)
-    scanned_all = False
-
-    while len(collected) < target_count:
-        cur.execute(f"""
-            SELECT FIRST ? SKIP ?
-                i.ITEMNO,
-                i.ITEMDESCRIPTION,
-                c.NAME,
-                i.UNIT1,
-                {unit_exprs["unit2"]},
-                {unit_exprs["unit3"]},
-                {unit_exprs["ratio2"]},
-                {unit_exprs["ratio3"]}
-            FROM ITEM i
-            JOIN ITEMCATEGORY c ON c.CATEGORYID = i.CATEGORYID
-            WHERE (i.ITEMTYPE = 0 OR i.ITEMTYPE IS NULL)
-              AND (i.SUSPENDED = 0 OR i.SUSPENDED IS NULL)
-              AND c.NAME IN ({_build_in_clause(FIFO_CATEGORIES)})
-            ORDER BY c.NAME, i.ITEMNO
-        """, [candidate_limit, candidate_skip] + list(FIFO_CATEGORIES))
-        candidate_rows = cur.fetchall()
-        if not candidate_rows:
-            scanned_all = True
-            break
-
-        stock_by_item = _fifo_fetch_stock_by_item(cur, [row[0] for row in candidate_rows])
-        for row in candidate_rows:
-            item_no = str(row[0] or "").strip()
-            stock_qty = float(stock_by_item.get(item_no, 0) or 0)
-            if stock_qty <= 0:
-                continue
-            collected.append((
-                row[0], row[1], row[2], row[3], stock_qty,
-                row[4], row[5], row[6], row[7],
-            ))
-            if len(collected) >= target_count:
-                break
-        candidate_skip += candidate_limit
-
-    page_rows = collected[offset:offset + limit]
+    cur.execute(f"""
+        SELECT FIRST ? SKIP ?
+            i.ITEMNO,
+            i.ITEMDESCRIPTION,
+            c.NAME,
+            i.UNIT1,
+            COALESCE((SELECT SUM(h.QUANTITY) FROM ITEMHIST h WHERE h.ITEMNO = i.ITEMNO), 0),
+            {unit_exprs["unit2"]},
+            {unit_exprs["unit3"]},
+            {unit_exprs["ratio2"]},
+            {unit_exprs["ratio3"]}
+        FROM ITEM i
+        LEFT JOIN ITEMCATEGORY c ON c.CATEGORYID = i.CATEGORYID
+        WHERE COALESCE(i.ITEMTYPE, 0) = 0
+          AND COALESCE(i.SUSPENDED, 0) = 0
+          AND COALESCE(c.NAME, '') IN ({_build_in_clause(FIFO_CATEGORIES)})
+          AND COALESCE((SELECT SUM(QUANTITY) FROM ITEMHIST h WHERE h.ITEMNO = i.ITEMNO), 0) > 0
+        ORDER BY c.NAME, i.ITEMNO
+    """, [limit, offset] + list(FIFO_CATEGORIES))
+    
+    page_rows = cur.fetchall()
+    
+    # We no longer need to check stock in python, the database did it for us
     data = _build_fifo_rows(page_rows, _fetch_fifo_cost_map(cur, [row[0] for row in page_rows]))
-    has_next = not scanned_all or len(collected) > offset + len(page_rows)
+    
     categories, total_items = _get_fifo_summary_counts(cur)
-    total_estimate = total_items or (len(collected) if scanned_all else max(offset + len(page_rows) + (1 if has_next else 0), len(collected)))
     summary = {
-        "total_items": total_estimate,
+        "total_items": total_items,
         "total_stock_value": round(sum(float(row.get("nilai_stock") or 0) for row in data), 2),
         "categories": categories,
     }
     if include_total:
-        return {"data": data, "total": total_estimate, "summary": summary}
+        return {"data": data, "total": total_items, "summary": summary}
     return data
 
 
