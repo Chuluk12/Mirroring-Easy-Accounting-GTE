@@ -1107,22 +1107,24 @@ def get_stock_data(search="", offset=0, limit=50, filters=None, include_total=Fa
                             "harga_stb": float(newcost or 0)
                         }
 
-                cur.execute(f"""
-                    SELECT ITEMNO, TXDATE, ITEMHISTID, COST, QUANTITY
-                    FROM ITEMHIST
-                    WHERE ITEMNO IN ({in_clause})
-                      AND COALESCE(COST, 0) > 0
-                    ORDER BY ITEMNO, TXDATE DESC, ITEMHISTID DESC
-                """, item_chunk)
-                for item_no, _tx_date, _itemhist_id, cost, quantity in cur.fetchall():
-                    key = str(item_no or "").strip()
-                    if key and key not in cost_description_by_item:
+                fallback_items = [item for item in item_chunk if item not in cost_description_by_item]
+                for item_no in fallback_items:
+                    cur.execute("""
+                        SELECT FIRST 1 TXDATE, ITEMHISTID, COST, QUANTITY
+                        FROM ITEMHIST
+                        WHERE ITEMNO = ?
+                          AND COALESCE(COST, 0) > 0
+                        ORDER BY TXDATE DESC, ITEMHISTID DESC
+                    """, [item_no])
+                    row = cur.fetchone()
+                    if row:
+                        _tx_date, _itemhist_id, cost, quantity = row
                         qty = float(quantity or 1)
                         if qty < 0:
                             actual_cost = abs(float(cost or 0) / qty)
                         else:
                             actual_cost = float(cost or 0)
-                        cost_description_by_item[key] = {
+                        cost_description_by_item[item_no] = {
                             "label": "HPP Metode FIFO",
                             "no_stb": "",
                             "harga_stb": actual_cost
