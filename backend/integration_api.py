@@ -1,5 +1,6 @@
 import hmac
 import hashlib
+import json
 import os
 import threading
 import time
@@ -9,6 +10,11 @@ from datetime import datetime, timedelta
 
 from flask import Blueprint, g, jsonify, request
 from flask_jwt_extended import create_access_token
+
+try:
+    from server import redis_client
+except ImportError:
+    redis_client = None
 
 
 API_PREFIX = "/api/integration/v1"
@@ -413,7 +419,7 @@ def _success_response(resource, upstream, offset, limit):
             if key not in {"data", "total", "error"}
         }
 
-    return jsonify({
+    return {
         "success": True,
         "api_version": "v1",
         "resource": resource,
@@ -427,7 +433,7 @@ def _success_response(resource, upstream, offset, limit):
             "has_more": offset + len(rows) < total,
             **extra,
         },
-    })
+    }, 200
 
 
 def register_integration_api(app):
@@ -481,6 +487,17 @@ def register_integration_api(app):
         if pagination_error:
             return pagination_error
 
+        cache_key = None
+        if redis_client and request.method == "GET":
+            raw_key = f"{resource}|{request.query_string.decode('utf-8', errors='replace')}"
+            cache_key = f"integration:v1:{hashlib.sha256(raw_key.encode()).hexdigest()[:32]}"
+            try:
+                cached = redis_client.get(cache_key)
+                if cached:
+                    return jsonify(json.loads(cached))
+            except Exception:
+                pass
+
         status_code, upstream = _internal_get(
             app,
             internal_path,
@@ -488,7 +505,19 @@ def register_integration_api(app):
         )
         if status_code >= 400 or upstream.get("error"):
             return _error_response(resource, status_code, upstream)
-        return _success_response(resource, upstream, offset, limit)
+        response_data, status = _success_response(resource, upstream, offset, limit)
+
+        if cache_key and redis_client:
+            try:
+                redis_client.setex(
+                    cache_key,
+                    int(os.getenv("EASY_INTEGRATION_CACHE_TTL_SECONDS", "60")),
+                    json.dumps(response_data),
+                )
+            except Exception:
+                pass
+
+        return jsonify(response_data), status
 
     @blueprint.get("/health")
     def health():
