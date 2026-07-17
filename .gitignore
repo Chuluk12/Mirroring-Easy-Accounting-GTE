@@ -6,6 +6,7 @@ __pycache__/
 *.err.log
 
 .env
+myenv
 frontend/.env
 backend/.env
 

@@ -6472,6 +6472,51 @@ def api_integration_standarisasi_material_bulk():
         print(f"Error api_integration_standarisasi_material_bulk: {e}")
         return jsonify({"message": str(e)}), 500
 
+@app.route("/api/integration/biaya-produksi")
+@jwt_required()
+def api_integration_biaya_produksi():
+    claims = get_jwt()
+    is_integration = claims.get("sub") == "integration-calculator" or claims.get("identity") == "integration-calculator" or get_jwt_identity() == "integration-calculator"
+    is_admin = claims.get("role") == "admin"
+    if not is_integration and not is_admin:
+        if not check_permission("spk_biaya_produksi"):
+            return jsonify({"message": "Akses ditolak"}), 403
+            
+    try:
+        search = request.args.get("search", "")
+        account = request.args.get("account", "")
+        status = request.args.get("status", "")
+        offset = max(int(request.args.get("offset", 0)), 0)
+        limit = min(max(int(request.args.get("limit", 50)), 1), 500)
+
+        con = fdb.connect(**DB_CONFIG)
+        cur = con.cursor()
+        where_sql, params = _biaya_produksi_where_clause(search, account, status)
+
+        cur.execute(f"""
+            SELECT COUNT(*)
+            {_BIAYA_PRODUKSI_FROM}
+            WHERE {where_sql}
+        """, params)
+        total = int(cur.fetchone()[0] or 0)
+
+        cur.execute(f"""
+            SELECT FIRST ? SKIP ? {_BIAYA_PRODUKSI_SELECT}
+            {_BIAYA_PRODUKSI_FROM}
+            WHERE {where_sql}
+            ORDER BY d.DLABORNO
+        """, [limit, offset] + params)
+        data = _build_biaya_produksi_rows(cur.fetchall())
+
+        con.close()
+        return jsonify({
+            "data": filter_record_columns("biaya_produksi", data),
+            "total": total
+        })
+    except Exception as e:
+        print(f"Error api_integration_biaya_produksi: {e}")
+        return jsonify({"data": [], "total": 0, "error": str(e)}), 500
+
 @app.route("/api/standarisasi-harga")
 @jwt_required()
 def api_standarisasi_harga():
