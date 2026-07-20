@@ -19,7 +19,7 @@ except ImportError:
 
 API_PREFIX = "/api/integration/v1"
 COMMON_PARAMS = {
-    "offset", "limit", "search", "columns", "sort_by", "sort_order",
+    "offset", "limit", "page", "search", "columns", "sort_by", "sort_order",
     "date_from", "date_to", "created_from", "created_to",
 }
 ALLOWED_PARAMS = {
@@ -155,8 +155,13 @@ def _unknown_params(resource):
 
 def _pagination():
     try:
-        offset = max(int(request.args.get("offset", 0)), 0)
         limit = min(max(int(request.args.get("limit", 100)), 1), 500)
+        page_value = request.args.get("page")
+        if page_value not in (None, ""):
+            page = max(int(page_value), 1)
+            offset = (page - 1) * limit
+        else:
+            offset = max(int(request.args.get("offset", 0)), 0)
         return offset, limit, None
     except (TypeError, ValueError):
         return 0, 100, (
@@ -165,7 +170,7 @@ def _pagination():
                 "api_version": "v1",
                 "error": {
                     "code": "invalid_pagination",
-                    "message": "offset dan limit harus berupa angka",
+                    "message": "offset, limit, dan page harus berupa angka",
                 },
             }),
             400,
@@ -419,6 +424,9 @@ def _success_response(resource, upstream, offset, limit):
             if key not in {"data", "total", "error"}
         }
 
+    page = (offset // limit) + 1 if limit else 1
+    total_page = ((total + limit - 1) // limit) if limit else 0
+
     return {
         "success": True,
         "api_version": "v1",
@@ -427,9 +435,11 @@ def _success_response(resource, upstream, offset, limit):
         "data": rows,
         "meta": {
             "offset": offset,
+            "page": page,
             "limit": limit,
             "count": len(rows),
             "total": total,
+            "total_page": total_page,
             "has_more": offset + len(rows) < total,
             **extra,
         },

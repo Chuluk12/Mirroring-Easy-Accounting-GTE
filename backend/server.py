@@ -5940,21 +5940,14 @@ def _fifo_date_filter_clause(date_from="", date_to=""):
     conditions = []
     params = []
     if str(date_from or "").strip():
-        conditions.append("hd.TXDATE >= ?")
+        conditions.append("s.LAST_STOCK_TXDATE >= ?")
         params.append(str(date_from).strip())
     if str(date_to or "").strip():
-        conditions.append("hd.TXDATE <= ?")
+        conditions.append("s.LAST_STOCK_TXDATE <= ?")
         params.append(str(date_to).strip())
     if not conditions:
         return "", []
-    return f"""
-          AND EXISTS (
-              SELECT 1
-              FROM ITEMHIST hd
-              WHERE hd.ITEMNO = i.ITEMNO
-                AND {' AND '.join(conditions)}
-          )
-    """, params
+    return f"AND {' AND '.join(conditions)}", params
 
 
 def _fetch_fifo_cost_map(cur, item_nos):
@@ -6080,10 +6073,15 @@ def _get_fifo_summary_counts(cur, date_from="", date_to=""):
         SELECT COALESCE(c.NAME, ''), COUNT(*)
         FROM ITEM i
         LEFT JOIN ITEMCATEGORY c ON c.CATEGORYID = i.CATEGORYID
+        LEFT JOIN (
+            SELECT ITEMNO, SUM(QUANTITY) AS STOCK_QTY, MAX(TXDATE) AS LAST_STOCK_TXDATE
+            FROM ITEMHIST
+            GROUP BY ITEMNO
+        ) s ON s.ITEMNO = i.ITEMNO
         WHERE COALESCE(i.ITEMTYPE, 0) = 0
           AND COALESCE(i.SUSPENDED, 0) = 0
           AND COALESCE(c.NAME, '') IN ({_build_in_clause(FIFO_CATEGORIES)})
-          AND COALESCE((SELECT SUM(QUANTITY) FROM ITEMHIST h WHERE h.ITEMNO = i.ITEMNO), 0) > 0
+          AND COALESCE(s.STOCK_QTY, 0) > 0
           {date_sql}
         GROUP BY c.NAME
         ORDER BY c.NAME
@@ -6114,18 +6112,23 @@ def _get_fifo_search_data(cur, search="", offset=0, limit=50, include_total=Fals
             i.ITEMDESCRIPTION,
             c.NAME,
             i.UNIT1,
-            COALESCE((SELECT SUM(h.QUANTITY) FROM ITEMHIST h WHERE h.ITEMNO = i.ITEMNO), 0),
+            COALESCE(s.STOCK_QTY, 0),
             {unit_exprs["unit2"]},
             {unit_exprs["unit3"]},
             {unit_exprs["ratio2"]},
             {unit_exprs["ratio3"]},
-            (SELECT MAX(hd.TXDATE) FROM ITEMHIST hd WHERE hd.ITEMNO = i.ITEMNO)
+            s.LAST_STOCK_TXDATE
         FROM ITEM i
         LEFT JOIN ITEMCATEGORY c ON c.CATEGORYID = i.CATEGORYID
+        LEFT JOIN (
+            SELECT ITEMNO, SUM(QUANTITY) AS STOCK_QTY, MAX(TXDATE) AS LAST_STOCK_TXDATE
+            FROM ITEMHIST
+            GROUP BY ITEMNO
+        ) s ON s.ITEMNO = i.ITEMNO
         WHERE COALESCE(i.ITEMTYPE, 0) = 0
           AND COALESCE(i.SUSPENDED, 0) = 0
           AND COALESCE(c.NAME, '') IN ({_build_in_clause(FIFO_CATEGORIES)})
-          AND COALESCE((SELECT SUM(QUANTITY) FROM ITEMHIST h WHERE h.ITEMNO = i.ITEMNO), 0) > 0
+          AND COALESCE(s.STOCK_QTY, 0) > 0
           {date_sql}
           {search_sql}
         ORDER BY c.NAME, i.ITEMNO
@@ -6166,18 +6169,23 @@ def _get_fifo_page_data(cur, offset=0, limit=50, include_total=False, date_from=
             i.ITEMDESCRIPTION,
             c.NAME,
             i.UNIT1,
-            COALESCE((SELECT SUM(h.QUANTITY) FROM ITEMHIST h WHERE h.ITEMNO = i.ITEMNO), 0),
+            COALESCE(s.STOCK_QTY, 0),
             {unit_exprs["unit2"]},
             {unit_exprs["unit3"]},
             {unit_exprs["ratio2"]},
             {unit_exprs["ratio3"]},
-            (SELECT MAX(hd.TXDATE) FROM ITEMHIST hd WHERE hd.ITEMNO = i.ITEMNO)
+            s.LAST_STOCK_TXDATE
         FROM ITEM i
         LEFT JOIN ITEMCATEGORY c ON c.CATEGORYID = i.CATEGORYID
+        LEFT JOIN (
+            SELECT ITEMNO, SUM(QUANTITY) AS STOCK_QTY, MAX(TXDATE) AS LAST_STOCK_TXDATE
+            FROM ITEMHIST
+            GROUP BY ITEMNO
+        ) s ON s.ITEMNO = i.ITEMNO
         WHERE COALESCE(i.ITEMTYPE, 0) = 0
           AND COALESCE(i.SUSPENDED, 0) = 0
           AND COALESCE(c.NAME, '') IN ({_build_in_clause(FIFO_CATEGORIES)})
-          AND COALESCE((SELECT SUM(QUANTITY) FROM ITEMHIST h WHERE h.ITEMNO = i.ITEMNO), 0) > 0
+          AND COALESCE(s.STOCK_QTY, 0) > 0
           {date_sql}
         ORDER BY c.NAME, i.ITEMNO
     """, [limit, offset] + list(FIFO_CATEGORIES) + date_params)
