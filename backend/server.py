@@ -238,7 +238,7 @@ MODULE_COLUMNS = {
     "fifo": [
         "no_barang", "deskripsi_barang", "kategori_barang",
         "satuan_1", "stok_satuan_1", "satuan_2", "stok_satuan_2",
-        "satuan_3", "stok_satuan_3", "harga_fifo", "nilai_stock",
+        "satuan_3", "stok_satuan_3", "harga_fifo", "nilai_stock", "txdate",
         "sumber_harga",
     ],
     "monitoring_formula": [
@@ -5989,6 +5989,7 @@ def _fetch_fifo_cost_map(cur, item_nos):
                     result[key] = {
                         "harga_fifo": cost,
                         "nilai_stock": 0.0,
+                        "txdate": txdate.isoformat() if txdate else "",
                         "sumber_harga": "FIFO",
                     }
                 result[key]["nilai_stock"] = float(result[key].get("nilai_stock") or 0) + (remaining_qty * cost)
@@ -6014,6 +6015,7 @@ def _fetch_fifo_cost_map(cur, item_nos):
             result[item_no] = {
                 "harga_fifo": float(unit_cost or 0),
                 "nilai_stock": None,
+                "txdate": _txdate.isoformat() if _txdate else "",
                 "sumber_harga": "Riwayat biaya terakhir",
             }
     return result
@@ -6043,6 +6045,7 @@ def _build_fifo_rows(rows, cost_by_item):
             "stok_satuan_3": None if not str(row[6] or "").strip() else round(_fifo_convert_stock(stock_qty, ratio3) or 0, 4),
             "harga_fifo": round(harga_fifo, 4),
             "nilai_stock": round(float(nilai_stock or 0), 2),
+            "txdate": str(cost_info.get("txdate") or "").strip(),
             "sumber_harga": str(cost_info.get("sumber_harga") or "").strip(),
         })
     return data
