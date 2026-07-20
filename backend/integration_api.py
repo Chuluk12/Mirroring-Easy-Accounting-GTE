@@ -34,7 +34,7 @@ ALLOWED_PARAMS = {
     },
     "biaya-produksi": {"search", "account", "status"},
     "standarisasi-harga": {"search", "status", "date_from", "date_to"},
-    "fifo": {"search"},
+    "fifo": {"search", "columns", "date_from", "date_to"},
 }
 _RATE_BUCKETS = defaultdict(deque)
 _RATE_LOCK = threading.Lock()
