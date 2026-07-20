@@ -147,7 +147,7 @@ BACKEND_PORT = int(os.getenv("EASY_BACKEND_PORT", "5000"))
 MODULE_COLUMNS = {
     "stock": [
         "itemno", "description", "description2", "quantity", "minimum_qty", "unit", "category",
-        "cost_description", "stock_note", "code_product",
+        "cost_description", "stock_note", "code_product", "last_updated_txdate",
     ],
     "siinas": [
         "no_urut", "no_barang", "deskripsi_persediaan", "kode_barang_jadi",
@@ -694,6 +694,20 @@ def _stock_code_product_filter_clause(filters, code_product_expr):
     return conditions, params
 
 
+def _stock_date_filter_clause(date_from="", date_to=""):
+    conditions = []
+    params = []
+    if str(date_from or "").strip():
+        conditions.append("s.LAST_UPDATED_TXDATE >= ?")
+        params.append(str(date_from).strip())
+    if str(date_to or "").strip():
+        conditions.append("s.LAST_UPDATED_TXDATE <= ?")
+        params.append(str(date_to).strip())
+    if not conditions:
+        return "", []
+    return f" AND {' AND '.join(conditions)}", params
+
+
 def _stock_where_clause(search="", filters=None, code_product_expr="CAST('' AS VARCHAR(255))"):
     filters = filters or {}
     conditions = []
@@ -977,11 +991,12 @@ def _stock_rows_to_records(rows, cost_description_by_item=None):
             "harga_stb": cost_info.get("harga_stb", 0.0),
             "stock_note": "Stok di bawah minimum" if stock_below_minimum else "",
             "code_product": str(r[8] or "").strip(),
+            "last_updated_txdate": r[9].isoformat() if len(r) > 9 and r[9] else "",
         })
     return data
 
 
-def _get_stock_search_fallback(cur, search, limit, offset, code_product_expr, filters=None):
+def _get_stock_search_fallback(cur, search, limit, offset, code_product_expr, filters=None, date_from="", date_to=""):
     search = str(search or "").strip()
     if not search:
         return [], 0
@@ -1005,6 +1020,7 @@ def _get_stock_search_fallback(cur, search, limit, offset, code_product_expr, fi
     extra_conditions = ""
     if code_filter_conditions:
         extra_conditions = " AND " + " AND ".join(code_filter_conditions)
+    date_sql, date_params = _stock_date_filter_clause(date_from, date_to)
 
     where_sql = f"""
         i.ITEMNO IS NOT NULL
@@ -1023,32 +1039,44 @@ def _get_stock_search_fallback(cur, search, limit, offset, code_product_expr, fi
         SELECT COUNT(*)
         FROM ITEM i
         LEFT JOIN ITEMCATEGORY c ON c.CATEGORYID = i.CATEGORYID
-        WHERE {where_sql}
-    """, params)
+        LEFT JOIN (
+            SELECT ITEMNO, MAX(TXDATE) AS LAST_UPDATED_TXDATE
+            FROM ITEMHIST
+            GROUP BY ITEMNO
+        ) s ON s.ITEMNO = i.ITEMNO
+        WHERE {where_sql} {date_sql}
+    """, params + date_params)
     total = int(cur.fetchone()[0] or 0)
     cur.execute(f"""
         SELECT FIRST ? SKIP ?
             i.ITEMNO, i.ITEMDESCRIPTION, i.ITEMDESCRIPTION2,
             i.UNIT1, i.TIPEPERSEDIAAN, c.NAME, i.MINIMUMQTY,
             COALESCE((SELECT SUM(h.QUANTITY) FROM ITEMHIST h WHERE h.ITEMNO = i.ITEMNO), 0),
-            {code_product_expr}
+            {code_product_expr},
+            s.LAST_UPDATED_TXDATE
         FROM ITEM i
         LEFT JOIN ITEMCATEGORY c ON c.CATEGORYID = i.CATEGORYID
-        WHERE {where_sql}
+        LEFT JOIN (
+            SELECT ITEMNO, MAX(TXDATE) AS LAST_UPDATED_TXDATE
+            FROM ITEMHIST
+            GROUP BY ITEMNO
+        ) s ON s.ITEMNO = i.ITEMNO
+        WHERE {where_sql} {date_sql}
         ORDER BY i.ITEMNO
-    """, [limit, offset] + params)
+    """, [limit, offset] + params + date_params)
     return cur.fetchall(), total
 
 
-def get_stock_data(search="", offset=0, limit=50, filters=None, include_total=False, sort_field="", sort_order=""):
+def get_stock_data(search="", offset=0, limit=50, filters=None, include_total=False, sort_field="", sort_order="", date_from="", date_to=""):
     try:
         con = fdb.connect(**DB_CONFIG)
         cur = con.cursor()
         code_product_expr = _stock_code_product_expr(cur)
         where_sql, where_params = _stock_where_clause(search, filters, code_product_expr)
+        date_sql, date_params = _stock_date_filter_clause(date_from, date_to)
 
         if search:
-            rows, total = _get_stock_search_fallback(cur, search, limit, offset, code_product_expr, filters)
+            rows, total = _get_stock_search_fallback(cur, search, limit, offset, code_product_expr, filters, date_from, date_to)
         else:
             total = 0
             if include_total:
@@ -1056,8 +1084,13 @@ def get_stock_data(search="", offset=0, limit=50, filters=None, include_total=Fa
                     SELECT COUNT(*)
                     FROM ITEM i
                     LEFT JOIN ITEMCATEGORY c ON c.CATEGORYID = i.CATEGORYID
-                    WHERE {where_sql}
-                """, where_params)
+                    LEFT JOIN (
+                        SELECT ITEMNO, MAX(TXDATE) AS LAST_UPDATED_TXDATE
+                        FROM ITEMHIST
+                        GROUP BY ITEMNO
+                    ) s ON s.ITEMNO = i.ITEMNO
+                    WHERE {where_sql} {date_sql}
+                """, where_params + date_params)
                 total = int(cur.fetchone()[0] or 0)
 
             order_sql = _stock_order_clause(sort_field, sort_order, code_product_expr)
@@ -1066,12 +1099,18 @@ def get_stock_data(search="", offset=0, limit=50, filters=None, include_total=Fa
                     i.ITEMNO, i.ITEMDESCRIPTION, i.ITEMDESCRIPTION2,
                     i.UNIT1, i.TIPEPERSEDIAAN, c.NAME, i.MINIMUMQTY,
                     COALESCE((SELECT SUM(h.QUANTITY) FROM ITEMHIST h WHERE h.ITEMNO = i.ITEMNO), 0),
-                    {code_product_expr}
+                    {code_product_expr},
+                    s.LAST_UPDATED_TXDATE
                 FROM ITEM i
                 LEFT JOIN ITEMCATEGORY c ON c.CATEGORYID = i.CATEGORYID
-                WHERE {where_sql}
+                LEFT JOIN (
+                    SELECT ITEMNO, MAX(TXDATE) AS LAST_UPDATED_TXDATE
+                    FROM ITEMHIST
+                    GROUP BY ITEMNO
+                ) s ON s.ITEMNO = i.ITEMNO
+                WHERE {where_sql} {date_sql}
                 ORDER BY {order_sql}
-            """, [limit, offset] + where_params)
+            """, [limit, offset] + where_params + date_params)
             rows = cur.fetchall()
 
         item_nos_original = [str(r[0] or "").strip() for r in rows if str(r[0] or "").strip()]
@@ -1309,6 +1348,8 @@ def api_stock():
         include_total=include_total,
         sort_field=sort_field,
         sort_order=sort_order,
+        date_from=request.args.get("date_from", ""),
+        date_to=request.args.get("date_to", ""),
     )
     if include_total:
         return jsonify({
@@ -1344,6 +1385,8 @@ def api_stock_export():
         include_total=False,
         sort_field=request.args.get("sort_field", ""),
         sort_order=request.args.get("sort_order", ""),
+        date_from=request.args.get("date_from", ""),
+        date_to=request.args.get("date_to", ""),
     )
     data = filter_record_columns("stock", result)
     return jsonify({"data": data, "total_rows": len(data)})

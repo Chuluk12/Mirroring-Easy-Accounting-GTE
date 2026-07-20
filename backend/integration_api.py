@@ -30,7 +30,7 @@ ALLOWED_PARAMS = {
     "stock": {
         "search", "itemno", "description", "description2", "quantity",
         "minimum_qty", "stock_note", "code_product", "cost_description",
-        "unit", "category", "sort_field", "sort_order",
+        "unit", "category", "sort_field", "sort_order", "date_from", "date_to",
     },
     "biaya-produksi": {"search", "account", "status"},
     "standarisasi-harga": {"search", "status", "date_from", "date_to"},
