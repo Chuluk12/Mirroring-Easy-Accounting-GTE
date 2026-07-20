@@ -239,7 +239,7 @@ MODULE_COLUMNS = {
         "no_barang", "deskripsi_barang", "kategori_barang",
         "satuan_1", "stok_satuan_1", "satuan_2", "stok_satuan_2",
         "satuan_3", "stok_satuan_3", "harga_fifo", "nilai_stock", "txdate",
-        "sumber_harga",
+        "last_stock_txdate", "sumber_harga",
     ],
     "monitoring_formula": [
         "wodet_id", "no_spk", "tanggal", "no_barang", "nama_barang", "qty_spk",
@@ -6049,6 +6049,7 @@ def _build_fifo_rows(rows, cost_by_item):
         stock_qty = float(row[4] or 0)
         ratio2 = float(row[7] or 0)
         ratio3 = float(row[8] or 0)
+        last_stock_txdate = row[9] if len(row) > 9 else None
         cost_info = cost_by_item.get(item_no, {})
         harga_fifo = float(cost_info.get("harga_fifo") or 0)
         nilai_stock = cost_info.get("nilai_stock")
@@ -6067,6 +6068,7 @@ def _build_fifo_rows(rows, cost_by_item):
             "harga_fifo": round(harga_fifo, 4),
             "nilai_stock": round(float(nilai_stock or 0), 2),
             "txdate": str(cost_info.get("txdate") or "").strip(),
+            "last_stock_txdate": last_stock_txdate.isoformat() if last_stock_txdate else "",
             "sumber_harga": str(cost_info.get("sumber_harga") or "").strip(),
         })
     return data
@@ -6116,7 +6118,8 @@ def _get_fifo_search_data(cur, search="", offset=0, limit=50, include_total=Fals
             {unit_exprs["unit2"]},
             {unit_exprs["unit3"]},
             {unit_exprs["ratio2"]},
-            {unit_exprs["ratio3"]}
+            {unit_exprs["ratio3"]},
+            (SELECT MAX(hd.TXDATE) FROM ITEMHIST hd WHERE hd.ITEMNO = i.ITEMNO)
         FROM ITEM i
         LEFT JOIN ITEMCATEGORY c ON c.CATEGORYID = i.CATEGORYID
         WHERE COALESCE(i.ITEMTYPE, 0) = 0
@@ -6167,7 +6170,8 @@ def _get_fifo_page_data(cur, offset=0, limit=50, include_total=False, date_from=
             {unit_exprs["unit2"]},
             {unit_exprs["unit3"]},
             {unit_exprs["ratio2"]},
-            {unit_exprs["ratio3"]}
+            {unit_exprs["ratio3"]},
+            (SELECT MAX(hd.TXDATE) FROM ITEMHIST hd WHERE hd.ITEMNO = i.ITEMNO)
         FROM ITEM i
         LEFT JOIN ITEMCATEGORY c ON c.CATEGORYID = i.CATEGORYID
         WHERE COALESCE(i.ITEMTYPE, 0) = 0
