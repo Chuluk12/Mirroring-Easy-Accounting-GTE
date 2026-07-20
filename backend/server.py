@@ -6,27 +6,25 @@ from flask_jwt_extended import (
     get_jwt_identity, get_jwt
 )
 from datetime import datetime, timedelta
-import zipfile
-import xml.etree.ElementTree as ET
 from functools import lru_cache
 from pathlib import Path
+import xml.etree.ElementTree as ET
 from werkzeug.middleware.proxy_fix import ProxyFix
 from auth import (
     init_db, get_user, get_user_permissions,
     get_all_users, get_user_by_id, create_user, delete_user, verify_password,
     update_user_password, upsert_role, delete_role, get_all_column_permissions, get_user_column_permissions,
     save_barang_baru, get_barang_baru_log, get_max_logged_itemid,
-    log_activity, get_audit_logs
+    log_activity, get_audit_logs, connect_dashboard_db, DASHBOARD_DB_KIND
 )
 from integration_api import register_integration_api
 import fdb
 import logging
 import os
-import platform
+import re
 import threading
 import time
-import redis
-import json
+import zipfile
 
 
 def load_env_file(path):
@@ -54,16 +52,6 @@ app = Flask(__name__)
 app.logger.setLevel(
     getattr(logging, os.getenv("EASY_LOG_LEVEL", "INFO").upper(), logging.INFO)
 )
-
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-try:
-    redis_client = redis.from_url(REDIS_URL, decode_responses=True)
-    # Ping to check if Redis is available, ignore if not to prevent crashing
-    redis_client.ping()
-except Exception as e:
-    app.logger.warning(f"Redis not available at {REDIS_URL}: {e}")
-    redis_client = None
-
 if os.getenv("EASY_TRUST_PROXY", "0").lower() in {"1", "true", "yes"}:
     app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 
@@ -93,24 +81,7 @@ socketio = SocketIO(
     max_http_buffer_size=50*1024*1024,
 )
 
-import platform
-
-# ...
-
-# fdb.load_api handling
-fb_dll_path = os.getenv("EASY_FBCLIENT_PATH")
-if not fb_dll_path:
-    if platform.system() == "Windows":
-        fb_dll_path = "C:/Program Files/Firebird/Firebird_3_0/fbclient.dll"
-    else:
-        fb_dll_path = "/usr/lib/x86_64-linux-gnu/libfbclient.so.2" # Default debian/ubuntu path
-
-try:
-    fdb.load_api(fb_dll_path)
-except Exception as e:
-    app.logger.warning(f"Gagal meload firebird client library di {fb_dll_path}: {e}")
-
-init_db()
+fdb.load_api("C:/Program Files/Firebird/Firebird_3_0/fbclient.dll")
 
 register_integration_api(app)
 
@@ -142,21 +113,46 @@ DB_CONFIG = {
     "password": os.getenv("EASY_DB_PASSWORD", "NewPassword123")
 }
 
-BACKEND_PORT = int(os.getenv("EASY_BACKEND_PORT", "5000"))
+BACKEND_PORT = int(os.getenv("EASY_BACKEND_PORT", "5001"))
+BACKGROUND_SYNC_ENABLED = os.getenv("EASY_BACKGROUND_SYNC_ENABLED", "0").lower() in {"1", "true", "yes"}
+BACKGROUND_SYNC_INTERVAL = max(int(os.getenv("EASY_BACKGROUND_SYNC_INTERVAL", "60")), 10)
+
+
+def connect_easy_db(retries=2, delay=0.4):
+    last_error = None
+    for attempt in range(retries + 1):
+        try:
+            return fdb.connect(**DB_CONFIG)
+        except Exception as exc:
+            last_error = exc
+            app.logger.warning(
+                "EASY DB connect failed attempt %s/%s to %s:%s %s: %s",
+                attempt + 1,
+                retries + 1,
+                DB_CONFIG.get("host"),
+                DB_CONFIG.get("port"),
+                DB_CONFIG.get("database"),
+                exc,
+            )
+            if attempt < retries:
+                time.sleep(delay)
+    raise last_error
 
 MODULE_COLUMNS = {
     "stock": [
         "itemno", "description", "description2", "quantity", "minimum_qty", "unit", "category",
-        "cost_description", "stock_note", "code_product", "last_updated_txdate",
+        "cost_description", "stock_note", "code_product",
+    ],
+    "gudang": [
+        "warehouse_id", "name", "description", "address", "pic", "branch_code",
+        "status", "total_items", "total_qty", "warehouse_name", "itemno",
+        "description2", "unit", "category", "quantity", "total_quantity",
+        "code_product", "item_type", "inventory_type", "suspended", "warehouse_quantities",
     ],
     "siinas": [
-        "no_urut", "no_barang", "deskripsi_persediaan", "kode_barang_jadi",
-        "jenis_barang_jadi", "fsa", "hs_code", "kbli", "barang_jadi",
-        "jenis_persediaan", "akun_persediaan", "nama_pemasok_barang",
-        "unit_1", "rasio_2_barang", "unit_2", "rasio_3_barang", "unit_3",
-        "tgl_faktur", "no_faktur", "deskripsi_barang", "tipe_transaksi", "masuk", "keluar",
-        "nama_pelanggan_pemasok", "negara_pelanggan_pemasok", "tipe_persediaan_barang",
-        "akun_persediaan_barang",
+        "tanggal_gp", "kode_kategori", "nilai_produksi_gp",
+        "kts_satuan_asli", "kts_standar_kgm",
+        "nilai_produksi_kgm", "nilai_produksi_asli",
     ],
     "barang-baru": [
         "created_at", "itemno", "description", "description2", "unit",
@@ -174,6 +170,12 @@ MODULE_COLUMNS = {
         "no_permintaan", "tgl_permintaan", "no_pemasok", "nama_pemasok",
         "deskripsi", "no_barang", "deskripsi_barang", "qty", "uom",
         "price", "disc_pct", "ppn_kode", "ppn_rate", "ppn_amount", "amount",
+    ],
+    "pemasok": [
+        "id", "no_pemasok", "nama_pemasok", "alamat_1", "alamat_2",
+        "kota", "provinsi", "kode_pos", "negara", "kontak", "telp",
+        "fax", "email", "website", "saldo", "credit_limit", "mata_uang",
+        "catatan", "dihentikan",
     ],
     "penerimaan": [
         "no_penerimaan", "no_formulir", "tgl_penerimaan", "no_pemasok", "nama_pemasok",
@@ -215,12 +217,6 @@ MODULE_COLUMNS = {
         "no_pesanan", "no_po", "total_mat_plan", "total_mat_keluar",
         "material_progress", "production_status",
     ],
-    "spk-simple": [
-        "wodet_id", "no_spk", "tanggal", "estimasi", "tgl_selesai", "deskripsi", "no_barang",
-        "nama_barang", "job_desc", "qty", "uom", "status_barang", "tipe_persediaan",
-        "no_pesanan", "no_po", "total_mat_plan", "total_mat_keluar",
-        "material_progress", "production_status", "qty_hasil_produksi"
-    ],
     "formula": [
         "formula_id", "no_formula", "kategori_produk", "deskripsi_formula",
         "no_barang", "spesifikasi_produk", "qty_build", "unit", "status",
@@ -238,8 +234,8 @@ MODULE_COLUMNS = {
     "fifo": [
         "no_barang", "deskripsi_barang", "kategori_barang",
         "satuan_1", "stok_satuan_1", "satuan_2", "stok_satuan_2",
-        "satuan_3", "stok_satuan_3", "harga_fifo", "nilai_stock", "txdate",
-        "last_stock_txdate", "sumber_harga",
+        "satuan_3", "stok_satuan_3", "harga_fifo", "nilai_stock",
+        "sumber_harga",
     ],
     "monitoring_formula": [
         "wodet_id", "no_spk", "tanggal", "no_barang", "nama_barang", "qty_spk",
@@ -265,6 +261,11 @@ MODULE_COLUMNS = {
         "no_barang", "deskripsi_barang", "qty_produksi", "qty_terjual",
         "hpp_total", "hpp_per_unit", "harga_jual_rata", "nilai_jual",
         "laba_rugi", "margin_pct", "status", "sales_details",
+    ],
+    "profit_loss": [
+        "customer", "no_faktur", "no_do", "no_so", "no_po", "tgl_faktur",
+        "no_barang", "deskripsi_barang", "qty", "satuan", "harga_satuan", "jumlah", "hpp", "laba_rugi",
+        "persen", "reff_hpp", "no_spk", "remarks", "fifo_details",
     ],
     "aset": [
         "no_aktiva", "nama_aktiva", "tanggal_aktiva", "nilai_aktiva",
@@ -294,11 +295,13 @@ MODULE_COLUMNS = {
 
 MODULE_COLUMN_PARENTS = {
     "stock": "stock",
+    "gudang": "stock",
     "siinas": "siinas",
     "barang-baru": "barang-baru",
     "riwayat": "riwayat",
     "permintaan": "pembelian",
     "pembelian": "pembelian",
+    "pemasok": "pembelian",
     "penerimaan": "pembelian",
     "fpb": "pembelian",
     "penjualan_so": "penjualan",
@@ -314,6 +317,7 @@ MODULE_COLUMN_PARENTS = {
     "spm": "spk",
     "gp": "spk",
     "hpp": "akuntansi",
+    "profit_loss": "akuntansi",
     "aset": "akuntansi",
     "aset_bangunan": "akuntansi",
     "beban_gaji": "akuntansi",
@@ -324,11 +328,13 @@ MODULE_COLUMN_PARENTS = {
 
 MODULE_REQUIRED_RESPONSE_KEYS = {
     "stock": ["itemno"],
+    "gudang": ["warehouse_id", "name"],
     "siinas": ["no_barang"],
     "barang-baru": ["itemno"],
     "riwayat": ["itemno"],
     "permintaan": ["no_permintaan", "no_barang"],
     "pembelian": ["no_pembelian", "no_barang"],
+    "pemasok": ["id", "no_pemasok", "nama_pemasok", "dihentikan"],
     "penerimaan": ["no_penerimaan", "no_barang"],
     "fpb": ["no_faktur"],
     "penjualan_so": ["no_so", "no_barang"],
@@ -336,7 +342,6 @@ MODULE_REQUIRED_RESPONSE_KEYS = {
     "penjualan_do": ["no_pengiriman", "no_barang"],
     "invoice": ["no_faktur"],
     "spk": ["wodet_id", "no_spk", "no_barang"],
-    "spk-simple": ["wodet_id", "no_spk", "no_barang"],
     "formula": ["formula_id", "no_formula", "no_barang"],
     "biaya_produksi": ["no_biaya_produksi"],
     "standarisasi_harga": ["standar_id", "no_standarisasi"],
@@ -352,6 +357,7 @@ MODULE_REQUIRED_RESPONSE_KEYS = {
     "spm": ["no_pengeluaran", "no_barang"],
     "gp": ["no_hasil", "no_barang"],
     "hpp": ["no_barang", "sales_details"],
+    "profit_loss": ["row_key", "customer", "no_faktur", "no_do", "no_so", "no_po", "no_barang", "deskripsi_barang", "fifo_details"],
     "aset": ["no_aktiva"],
     "aset_bangunan": ["tanggal", "no_project", "nilai"],
     "beban_gaji": ["tanggal", "nilai"],
@@ -368,6 +374,15 @@ def filter_record_columns(module, rows, user=None):
     if not allowed:
         return rows
     allowed_set = set(allowed) | set(MODULE_REQUIRED_RESPONSE_KEYS.get(module, []))
+    if module == "gudang" and "warehouse_quantities" in allowed_set:
+        return [
+            {
+                key: value
+                for key, value in row.items()
+                if key in allowed_set or str(key).startswith("qty_")
+            }
+            for row in rows
+        ]
     return [{key: value for key, value in row.items() if key in allowed_set} for row in rows]
 
 # ─── HELPER ──────────────────────────────────────────────────────────────────
@@ -378,30 +393,16 @@ def login():
     username = data.get("username", "")
     password = data.get("password", "")
     user = get_user(username)
-    if not user:
-        app.logger.warning(f"Login failed: user '{username}' not found.")
+    if not user or not verify_password(password, user["password"]):
         log_activity(
             username=username,
             action="login_failed",
             module="auth",
-            description=f"Login gagal untuk username {username} (user not found)",
+            description=f"Login gagal untuk username {username}",
             ip_address=get_request_ip(),
             user_agent=request.headers.get("User-Agent"),
         )
         return jsonify({"message": "Username atau password salah"}), 401
-        
-    if not verify_password(password, user["password"]):
-        app.logger.warning(f"Login failed: wrong password for user '{username}'.")
-        log_activity(
-            username=username,
-            action="login_failed",
-            module="auth",
-            description=f"Login gagal untuk username {username} (wrong password)",
-            ip_address=get_request_ip(),
-            user_agent=request.headers.get("User-Agent"),
-        )
-        return jsonify({"message": "Username atau password salah"}), 401
-
     permissions = get_user_permissions(user["role"])
     column_permissions = get_user_column_permissions(user["role"])
     additional_claims = {
@@ -665,10 +666,86 @@ def _split_code_product_tokens(value):
     return tokens
 
 
+def _normalize_stock_code_search(value):
+    return "".join(ch for ch in str(value or "").upper() if ch.isalnum())
+
+
+def _stock_normalized_code_expr(column_expr):
+    normalized = f"UPPER(COALESCE({column_expr}, ''))"
+    for char in ("-", ".", " ", "/", "_"):
+        normalized = f"REPLACE({normalized}, '{char}', '')"
+    return normalized
+
+
 def _stock_code_product_expr(cur):
     columns = set(_get_table_columns(cur, "ITEM"))
     column = _match_column(columns, STOCK_CODE_PRODUCT_CANDIDATES)
     return f"i.{column}" if column else "CAST('' AS VARCHAR(255))"
+
+
+def _easy_stock_expr(item_expr="i.ITEMNO", through_today=False):
+    item_expr = item_expr or "i.ITEMNO"
+    saldo_expr = f"""
+        COALESCE((
+            SELECT SUM(sw.QTY)
+            FROM SALDO_WHS sw
+            WHERE sw.ITEMNO = {item_expr}
+        ), 0)
+    """
+    if not through_today:
+        return f"({saldo_expr})"
+    return f"""
+        (
+            {saldo_expr}
+            - COALESCE((
+                SELECT SUM(h.QUANTITY)
+                FROM ITEMHIST h
+                WHERE h.ITEMNO = {item_expr}
+                  AND h.TXDATE > CURRENT_DATE
+            ), 0)
+        )
+    """
+
+
+def _warehouse_stock_expr(warehouse_id, item_expr="i.ITEMNO", through_today=False):
+    warehouse_id = int(warehouse_id)
+    item_expr = item_expr or "i.ITEMNO"
+    saldo_expr = f"""
+        COALESCE((
+            SELECT SUM(sw.QTY)
+            FROM SALDO_WHS sw
+            WHERE sw.WAREHOUSEID = {warehouse_id}
+              AND sw.ITEMNO = {item_expr}
+        ), 0)
+    """
+    if not through_today:
+        return f"({saldo_expr})"
+    return f"""
+        (
+            {saldo_expr}
+            - COALESCE((
+                SELECT SUM(h.QUANTITY)
+                FROM ITEMHIST h
+                WHERE h.WAREHOUSEID = {warehouse_id}
+                  AND h.ITEMNO = {item_expr}
+                  AND h.TXDATE > CURRENT_DATE
+            ), 0)
+            - COALESCE((
+                SELECT SUM(
+                    CASE
+                        WHEN wt.TOWHID = {warehouse_id} THEN wd.QUANTITY
+                        WHEN wt.FROMWHID = {warehouse_id} THEN -wd.QUANTITY
+                        ELSE 0
+                    END
+                )
+                FROM WTRANDET wd
+                JOIN WTRAN wt ON wt.TRANSFERID = wd.TRANSFERID
+                WHERE wd.ITEMNO = {item_expr}
+                  AND (wt.TOWHID = {warehouse_id} OR wt.FROMWHID = {warehouse_id})
+                  AND wt.TRANSFERDATE > CURRENT_DATE
+            ), 0)
+        )
+    """
 
 
 def _stock_code_product_filter_clause(filters, code_product_expr):
@@ -694,20 +771,6 @@ def _stock_code_product_filter_clause(filters, code_product_expr):
     return conditions, params
 
 
-def _stock_date_filter_clause(date_from="", date_to=""):
-    conditions = []
-    params = []
-    if str(date_from or "").strip():
-        conditions.append("s.LAST_UPDATED_TXDATE >= ?")
-        params.append(str(date_from).strip())
-    if str(date_to or "").strip():
-        conditions.append("s.LAST_UPDATED_TXDATE <= ?")
-        params.append(str(date_to).strip())
-    if not conditions:
-        return "", []
-    return f" AND {' AND '.join(conditions)}", params
-
-
 def _stock_where_clause(search="", filters=None, code_product_expr="CAST('' AS VARCHAR(255))"):
     filters = filters or {}
     conditions = []
@@ -720,19 +783,24 @@ def _stock_where_clause(search="", filters=None, code_product_expr="CAST('' AS V
     else:
         conditions.append("i.ITEMNO IS NOT NULL")
     params = []
-    stock_qty_expr = "COALESCE((SELECT SUM(h.QUANTITY) FROM ITEMHIST h WHERE h.ITEMNO = i.ITEMNO), 0)"
+    stock_qty_expr = _easy_stock_expr("i.ITEMNO")
 
     if search:
+        normalized_search = _normalize_stock_code_search(search)
+        normalized_itemno_expr = _stock_normalized_code_expr("i.ITEMNO")
+        normalized_code_product_expr = _stock_normalized_code_expr(code_product_expr)
         search_parts = [f"""(
             LOWER(i.ITEMNO) CONTAINING LOWER(?)
             OR LOWER(i.ITEMDESCRIPTION) CONTAINING LOWER(?)
             OR LOWER(i.ITEMDESCRIPTION2) CONTAINING LOWER(?)
             OR LOWER({code_product_expr}) CONTAINING LOWER(?)
+            OR {normalized_itemno_expr} CONTAINING ?
+            OR {normalized_code_product_expr} CONTAINING ?
             OR LOWER(i.UNIT1) CONTAINING LOWER(?)
             OR LOWER(COALESCE(c.NAME, '')) CONTAINING LOWER(?)
             OR CAST(COALESCE(i.MINIMUMQTY, 0) AS VARCHAR(50)) CONTAINING ?
-            OR CAST(COALESCE((SELECT SUM(h.QUANTITY) FROM ITEMHIST h WHERE h.ITEMNO = i.ITEMNO), 0) AS VARCHAR(50)) CONTAINING ?
-            OR (? CONTAINING 'stok' AND COALESCE(i.MINIMUMQTY, 0) > 0 AND COALESCE((SELECT SUM(h.QUANTITY) FROM ITEMHIST h WHERE h.ITEMNO = i.ITEMNO), 0) < COALESCE(i.MINIMUMQTY, 0))
+            OR CAST({stock_qty_expr} AS VARCHAR(50)) CONTAINING ?
+            OR (? CONTAINING 'stok' AND COALESCE(i.MINIMUMQTY, 0) > 0 AND {stock_qty_expr} < COALESCE(i.MINIMUMQTY, 0))
             OR (? CONTAINING 'fifo' AND NOT EXISTS (
                 SELECT 1
                 FROM STANDARBIAYABRGDET sd
@@ -758,7 +826,12 @@ def _stock_where_clause(search="", filters=None, code_product_expr="CAST('' AS V
                   AND LOWER(sd.NOSTANDARBRG) CONTAINING LOWER(?)
             )
         )"""]
-        params.extend([search, search, search, search, search, search, search, search, search.lower(), search.lower(), search.lower(), search])
+        params.extend([
+            search, search, search, search,
+            normalized_search, normalized_search,
+            search, search, search, search,
+            search.lower(), search.lower(), search.lower(), search,
+        ])
 
         search_tokens = [
             token for token in "".join(ch if ch.isalnum() else " " for ch in str(search)).split()
@@ -922,7 +995,7 @@ def _stock_where_clause(search="", filters=None, code_product_expr="CAST('' AS V
 
 def _stock_order_clause(sort_field="", sort_order="", code_product_expr="CAST('' AS VARCHAR(255))"):
     direction = "DESC" if sort_order == "descend" else "ASC"
-    stock_qty_expr = "COALESCE((SELECT SUM(h.QUANTITY) FROM ITEMHIST h WHERE h.ITEMNO = i.ITEMNO), 0)"
+    stock_qty_expr = _easy_stock_expr("i.ITEMNO")
     stock_note_expr = f"CASE WHEN COALESCE(i.MINIMUMQTY, 0) > 0 AND {stock_qty_expr} < COALESCE(i.MINIMUMQTY, 0) THEN 0 ELSE 1 END"
     cost_description_expr = """
         CASE
@@ -966,17 +1039,6 @@ def _stock_rows_to_records(rows, cost_description_by_item=None):
         minimum_qty = float(r[6] or 0)
         quantity = float(r[7] or 0)
         stock_below_minimum = minimum_qty > 0 and quantity < minimum_qty
-
-        cost_info = cost_description_by_item.get(item_no, {})
-        if not cost_info:
-            # Fallback check using cleaned up base item number (e.g. ignoring trailing - X)
-            if " - " in item_no:
-                base_item_no = item_no.rsplit(" - ", 1)[0].strip()
-                cost_info = cost_description_by_item.get(base_item_no, {})
-
-        if isinstance(cost_info, str):
-            cost_info = {"label": cost_info, "no_stb": "", "harga_stb": 0.0}
-
         data.append({
             "itemno": item_no,
             "description": str(r[1] or "").strip(),
@@ -986,20 +1048,25 @@ def _stock_rows_to_records(rows, cost_description_by_item=None):
             "category": str(r[5] or "").strip(),
             "minimum_qty": minimum_qty,
             "quantity": quantity,
-            "cost_description": cost_info.get("label", ""),
-            "no_stb": cost_info.get("no_stb", ""),
-            "harga_stb": cost_info.get("harga_stb", 0.0),
+            "cost_description": cost_description_by_item.get(item_no, ""),
             "stock_note": "Stok di bawah minimum" if stock_below_minimum else "",
             "code_product": str(r[8] or "").strip(),
-            "last_updated_txdate": r[9].isoformat() if len(r) > 9 and r[9] else "",
         })
     return data
 
 
-def _get_stock_search_fallback(cur, search, limit, offset, code_product_expr, filters=None, date_from="", date_to=""):
+def _is_stock_code_search(search):
+    text = str(search or "").strip()
+    return "-" in text and any(ch.isalpha() for ch in text) and any(ch.isdigit() for ch in text)
+
+
+def _get_stock_search_fallback(cur, search, limit, offset, code_product_expr, filters=None):
     search = str(search or "").strip()
     if not search:
         return [], 0
+    normalized_search = _normalize_stock_code_search(search)
+    normalized_itemno_expr = _stock_normalized_code_expr("i.ITEMNO")
+    normalized_code_product_expr = _stock_normalized_code_expr(code_product_expr)
     token_values = [
         token for token in "".join(ch if ch.isalnum() else " " for ch in search).split()
         if len(token) >= 2
@@ -1020,7 +1087,47 @@ def _get_stock_search_fallback(cur, search, limit, offset, code_product_expr, fi
     extra_conditions = ""
     if code_filter_conditions:
         extra_conditions = " AND " + " AND ".join(code_filter_conditions)
-    date_sql, date_params = _stock_date_filter_clause(date_from, date_to)
+
+    if _is_stock_code_search(search):
+        code_prefix = f"{search}-"
+        code_where_sql = f"""
+            i.ITEMNO IS NOT NULL
+            AND COALESCE(i.SUSPENDED, 0) = 0
+            {extra_conditions}
+            AND (
+                UPPER(i.ITEMNO) = UPPER(?)
+                OR UPPER(i.ITEMNO) STARTING WITH UPPER(?)
+                OR UPPER({code_product_expr}) = UPPER(?)
+                OR UPPER({code_product_expr}) STARTING WITH UPPER(?)
+            )
+        """
+        code_params = code_filter_params + [search, code_prefix, search, code_prefix]
+        cur.execute(f"""
+            SELECT COUNT(*)
+            FROM ITEM i
+            LEFT JOIN ITEMCATEGORY c ON c.CATEGORYID = i.CATEGORYID
+            WHERE {code_where_sql}
+        """, code_params)
+        code_total = int(cur.fetchone()[0] or 0)
+        if code_total:
+            cur.execute(f"""
+                SELECT FIRST ? SKIP ?
+                    i.ITEMNO, i.ITEMDESCRIPTION, i.ITEMDESCRIPTION2,
+                    i.UNIT1, i.TIPEPERSEDIAAN, c.NAME, i.MINIMUMQTY,
+                    {_easy_stock_expr("i.ITEMNO")},
+                    {code_product_expr}
+                FROM ITEM i
+                LEFT JOIN ITEMCATEGORY c ON c.CATEGORYID = i.CATEGORYID
+                WHERE {code_where_sql}
+                ORDER BY
+                    CASE
+                        WHEN UPPER(i.ITEMNO) = UPPER(?) THEN 0
+                        WHEN UPPER({code_product_expr}) = UPPER(?) THEN 1
+                        ELSE 2
+                    END,
+                    i.ITEMNO
+            """, [limit, offset] + code_params + [search, search])
+            return cur.fetchall(), code_total
 
     where_sql = f"""
         i.ITEMNO IS NOT NULL
@@ -1031,143 +1138,119 @@ def _get_stock_search_fallback(cur, search, limit, offset, code_product_expr, fi
             OR LOWER(i.ITEMDESCRIPTION) CONTAINING LOWER(?)
             OR LOWER(i.ITEMDESCRIPTION2) CONTAINING LOWER(?)
             OR LOWER({code_product_expr}) CONTAINING LOWER(?)
+            OR {normalized_itemno_expr} CONTAINING ?
+            OR {normalized_code_product_expr} CONTAINING ?
             {token_condition}
         )
     """
-    params = code_filter_params + [search, search, search, search] + token_params
+    params = code_filter_params + [
+        search, search, search, search,
+        normalized_search, normalized_search,
+    ] + token_params
     cur.execute(f"""
         SELECT COUNT(*)
         FROM ITEM i
         LEFT JOIN ITEMCATEGORY c ON c.CATEGORYID = i.CATEGORYID
-        LEFT JOIN (
-            SELECT ITEMNO, MAX(TXDATE) AS LAST_UPDATED_TXDATE
-            FROM ITEMHIST
-            GROUP BY ITEMNO
-        ) s ON s.ITEMNO = i.ITEMNO
-        WHERE {where_sql} {date_sql}
-    """, params + date_params)
+        WHERE {where_sql}
+    """, params)
     total = int(cur.fetchone()[0] or 0)
     cur.execute(f"""
         SELECT FIRST ? SKIP ?
             i.ITEMNO, i.ITEMDESCRIPTION, i.ITEMDESCRIPTION2,
             i.UNIT1, i.TIPEPERSEDIAAN, c.NAME, i.MINIMUMQTY,
-            COALESCE((SELECT SUM(h.QUANTITY) FROM ITEMHIST h WHERE h.ITEMNO = i.ITEMNO), 0),
-            {code_product_expr},
-            s.LAST_UPDATED_TXDATE
+            {_easy_stock_expr("i.ITEMNO")},
+            {code_product_expr}
         FROM ITEM i
         LEFT JOIN ITEMCATEGORY c ON c.CATEGORYID = i.CATEGORYID
-        LEFT JOIN (
-            SELECT ITEMNO, MAX(TXDATE) AS LAST_UPDATED_TXDATE
-            FROM ITEMHIST
-            GROUP BY ITEMNO
-        ) s ON s.ITEMNO = i.ITEMNO
-        WHERE {where_sql} {date_sql}
-        ORDER BY i.ITEMNO
-    """, [limit, offset] + params + date_params)
+        WHERE {where_sql}
+        ORDER BY
+            CASE
+                WHEN {normalized_itemno_expr} STARTING WITH ? THEN 0
+                WHEN {normalized_code_product_expr} STARTING WITH ? THEN 1
+                WHEN {normalized_itemno_expr} CONTAINING ? THEN 2
+                WHEN {normalized_code_product_expr} CONTAINING ? THEN 3
+                WHEN LOWER(i.ITEMNO) CONTAINING LOWER(?) THEN 4
+                ELSE 5
+            END,
+            i.ITEMNO
+    """, [limit, offset] + params + [
+        normalized_search, normalized_search,
+        normalized_search, normalized_search,
+        search,
+    ])
     return cur.fetchall(), total
 
 
-def get_stock_data(search="", offset=0, limit=50, filters=None, include_total=False, sort_field="", sort_order="", date_from="", date_to=""):
+def get_stock_data(search="", offset=0, limit=50, filters=None, include_total=False, sort_field="", sort_order=""):
     try:
         con = fdb.connect(**DB_CONFIG)
         cur = con.cursor()
         code_product_expr = _stock_code_product_expr(cur)
         where_sql, where_params = _stock_where_clause(search, filters, code_product_expr)
-        date_sql, date_params = _stock_date_filter_clause(date_from, date_to)
 
         if search:
-            rows, total = _get_stock_search_fallback(cur, search, limit, offset, code_product_expr, filters, date_from, date_to)
-        else:
-            total = 0
+            rows, total = _get_stock_search_fallback(cur, search, limit, offset, code_product_expr, filters)
+            con.close()
+            data = _stock_rows_to_records(rows, {})
             if include_total:
-                cur.execute(f"""
-                    SELECT COUNT(*)
-                    FROM ITEM i
-                    LEFT JOIN ITEMCATEGORY c ON c.CATEGORYID = i.CATEGORYID
-                    LEFT JOIN (
-                        SELECT ITEMNO, MAX(TXDATE) AS LAST_UPDATED_TXDATE
-                        FROM ITEMHIST
-                        GROUP BY ITEMNO
-                    ) s ON s.ITEMNO = i.ITEMNO
-                    WHERE {where_sql} {date_sql}
-                """, where_params + date_params)
-                total = int(cur.fetchone()[0] or 0)
+                return {"data": data, "total": total}
+            return data
 
-            order_sql = _stock_order_clause(sort_field, sort_order, code_product_expr)
+        total = None
+        if include_total:
             cur.execute(f"""
-                SELECT FIRST ? SKIP ?
-                    i.ITEMNO, i.ITEMDESCRIPTION, i.ITEMDESCRIPTION2,
-                    i.UNIT1, i.TIPEPERSEDIAAN, c.NAME, i.MINIMUMQTY,
-                    COALESCE((SELECT SUM(h.QUANTITY) FROM ITEMHIST h WHERE h.ITEMNO = i.ITEMNO), 0),
-                    {code_product_expr},
-                    s.LAST_UPDATED_TXDATE
+                SELECT COUNT(*)
                 FROM ITEM i
                 LEFT JOIN ITEMCATEGORY c ON c.CATEGORYID = i.CATEGORYID
-                LEFT JOIN (
-                    SELECT ITEMNO, MAX(TXDATE) AS LAST_UPDATED_TXDATE
-                    FROM ITEMHIST
-                    GROUP BY ITEMNO
-                ) s ON s.ITEMNO = i.ITEMNO
-                WHERE {where_sql} {date_sql}
-                ORDER BY {order_sql}
-            """, [limit, offset] + where_params + date_params)
-            rows = cur.fetchall()
+                WHERE {where_sql}
+            """, where_params)
+            total = int(cur.fetchone()[0] or 0)
 
-        item_nos_original = [str(r[0] or "").strip() for r in rows if str(r[0] or "").strip()]
-        
-        # Include base item numbers for STB mapping since foreign keys sometimes use PO split prefixes
-        item_nos_set = set()
-        for i_no in item_nos_original:
-            item_nos_set.add(i_no)
-            if " - " in i_no:
-                item_nos_set.add(i_no.rsplit(" - ", 1)[0].strip())
-        
-        item_nos = list(item_nos_set)
-        
+        order_sql = _stock_order_clause(sort_field, sort_order, code_product_expr)
+        cur.execute(f"""
+            SELECT FIRST ? SKIP ?
+                i.ITEMNO, i.ITEMDESCRIPTION, i.ITEMDESCRIPTION2,
+                i.UNIT1, i.TIPEPERSEDIAAN, c.NAME, i.MINIMUMQTY,
+                {_easy_stock_expr("i.ITEMNO")},
+                {code_product_expr}
+            FROM ITEM i
+            LEFT JOIN ITEMCATEGORY c ON c.CATEGORYID = i.CATEGORYID
+            WHERE {where_sql}
+            ORDER BY {order_sql}
+        """, [limit, offset] + where_params)
+        rows = cur.fetchall()
+        if search and not rows:
+            rows, total = _get_stock_search_fallback(cur, search, limit, offset, code_product_expr, filters)
+        item_nos = [str(r[0] or "").strip() for r in rows if str(r[0] or "").strip()]
         cost_description_by_item = {}
         if item_nos:
             for start in range(0, len(item_nos), 900):
                 item_chunk = item_nos[start:start + 900]
                 in_clause = _build_in_clause(item_chunk)
                 cur.execute(f"""
-                    SELECT d.ITEMNO, s.NOSTANDARBRG, s.TGLMULAIBRG, s.TGLSTANDARBRG, d.NEWCOST
+                    SELECT d.ITEMNO, s.NOSTANDARBRG, s.TGLMULAIBRG, s.TGLSTANDARBRG
                     FROM STANDARBIAYABRG s
                     JOIN STANDARBIAYABRGDET d ON d.NOSTANDARBRG = s.NOSTANDARBRG
                     WHERE d.ITEMNO IN ({in_clause})
+                      AND COALESCE(d.NEWCOST, 0) > 0
                     ORDER BY d.ITEMNO, s.TGLMULAIBRG DESC, s.TGLSTANDARBRG DESC, s.NOSTANDARBRG DESC
                 """, item_chunk)
-                for item_no, standard_no, _effective_date, _standard_date, newcost in cur.fetchall():
+                for item_no, standard_no, _effective_date, _standard_date in cur.fetchall():
                     key = str(item_no or "").strip()
                     if key and key not in cost_description_by_item:
-                        standard_no_text = str(standard_no or '').strip()
-                        cost_description_by_item[key] = {
-                            "label": f"Standarisasi No :{standard_no_text}" if standard_no_text else "",
-                            "no_stb": standard_no_text,
-                            "harga_stb": float(newcost or 0)
-                        }
+                        cost_description_by_item[key] = f"Standarisasi No :{str(standard_no or '').strip()}"
 
-                fallback_items = [item for item in item_chunk if item not in cost_description_by_item]
-                for item_no in fallback_items:
-                    cur.execute("""
-                        SELECT FIRST 1 TXDATE, ITEMHISTID, COST, QUANTITY
-                        FROM ITEMHIST
-                        WHERE ITEMNO = ?
-                          AND COALESCE(COST, 0) > 0
-                        ORDER BY TXDATE DESC, ITEMHISTID DESC
-                    """, [item_no])
-                    row = cur.fetchone()
-                    if row:
-                        _tx_date, _itemhist_id, cost, quantity = row
-                        qty = float(quantity or 1)
-                        if qty < 0:
-                            actual_cost = abs(float(cost or 0) / qty)
-                        else:
-                            actual_cost = float(cost or 0)
-                        cost_description_by_item[item_no] = {
-                            "label": "HPP Metode FIFO",
-                            "no_stb": "",
-                            "harga_stb": actual_cost
-                        }
+                cur.execute(f"""
+                    SELECT ITEMNO, TXDATE, ITEMHISTID
+                    FROM ITEMHIST
+                    WHERE ITEMNO IN ({in_clause})
+                      AND COALESCE(COST, 0) > 0
+                    ORDER BY ITEMNO, TXDATE DESC, ITEMHISTID DESC
+                """, item_chunk)
+                for item_no, _tx_date, _itemhist_id in cur.fetchall():
+                    key = str(item_no or "").strip()
+                    if key and key not in cost_description_by_item:
+                        cost_description_by_item[key] = "HPP Metode FIFO"
         con.close()
         data = _stock_rows_to_records(rows, cost_description_by_item)
         if include_total:
@@ -1219,18 +1302,14 @@ def get_stock_summary():
         """)
         standardized_items = int(cur.fetchone()[0] or 0)
 
+        stock_qty_expr = _easy_stock_expr("i.ITEMNO")
         cur.execute(f"""
             SELECT COUNT(*)
             FROM ITEM i
             LEFT JOIN ITEMCATEGORY c ON c.CATEGORYID = i.CATEGORYID
-            LEFT JOIN (
-                SELECT ITEMNO, SUM(QUANTITY) AS QUANTITY
-                FROM ITEMHIST
-                GROUP BY ITEMNO
-            ) s ON s.ITEMNO = i.ITEMNO
             WHERE {base_where}
               AND COALESCE(i.MINIMUMQTY, 0) > 0
-              AND COALESCE(s.QUANTITY, 0) < COALESCE(i.MINIMUMQTY, 0)
+              AND {stock_qty_expr} < COALESCE(i.MINIMUMQTY, 0)
         """)
         below_minimum_items = int(cur.fetchone()[0] or 0)
 
@@ -1251,6 +1330,41 @@ def get_stock_summary():
             "standardized_items": 0,
             "below_minimum_items": 0,
         }
+
+
+def get_dashboard_stock_summary(cur):
+    cur.execute("""
+        SELECT
+            COUNT(*),
+            COUNT(DISTINCT i.CATEGORYID),
+            SUM(CASE WHEN COALESCE(i.MINIMUMQTY, 0) > 0 THEN 1 ELSE 0 END)
+        FROM ITEM i
+        WHERE COALESCE(i.ITEMTYPE, 0) = 0
+          AND COALESCE(i.SUSPENDED, 0) = 0
+    """)
+    row = cur.fetchone() or [0, 0, 0]
+    total_items = int(row[0] or 0)
+    category_count = int(row[1] or 0)
+    minimum_configured_items = int(row[2] or 0)
+
+    cur.execute("""
+        SELECT COUNT(DISTINCT ITEMNO)
+        FROM STANDARBIAYABRGDET
+        WHERE COALESCE(NEWCOST, 0) > 0
+    """)
+    standardized_items = int((cur.fetchone() or [0])[0] or 0)
+
+    return {
+        "total": total_items,
+        "kosong": 0,
+        "ada": total_items,
+        "total_items": total_items,
+        "category_count": category_count,
+        "categories": [],
+        "standardized_items": standardized_items,
+        "below_minimum_items": 0,
+        "minimum_configured_items": minimum_configured_items,
+    }
 
 
 _STOCK_FILTER_OPTIONS_CACHE = {"expires_at": 0, "data": None}
@@ -1313,10 +1427,6 @@ def get_stock_filter_options():
 def index():
     return render_template("index.html")
 
-@app.route("/health")
-def health_check():
-    return jsonify({"status": "healthy"}), 200
-
 @app.route("/api/stock")
 @jwt_required()
 def api_stock():
@@ -1348,8 +1458,6 @@ def api_stock():
         include_total=include_total,
         sort_field=sort_field,
         sort_order=sort_order,
-        date_from=request.args.get("date_from", ""),
-        date_to=request.args.get("date_to", ""),
     )
     if include_total:
         return jsonify({
@@ -1385,8 +1493,6 @@ def api_stock_export():
         include_total=False,
         sort_field=request.args.get("sort_field", ""),
         sort_order=request.args.get("sort_order", ""),
-        date_from=request.args.get("date_from", ""),
-        date_to=request.args.get("date_to", ""),
     )
     data = filter_record_columns("stock", result)
     return jsonify({"data": data, "total_rows": len(data)})
@@ -1431,7 +1537,7 @@ def api_stock_debug_item():
                 c.NAME,
                 i.UNIT1,
                 {code_expr},
-                COALESCE((SELECT SUM(h.QUANTITY) FROM ITEMHIST h WHERE h.ITEMNO = i.ITEMNO), 0)
+                {_easy_stock_expr("i.ITEMNO")}
             FROM ITEM i
             LEFT JOIN ITEMCATEGORY c ON c.CATEGORYID = i.CATEGORYID
             WHERE UPPER(i.ITEMNO) = UPPER(?)
@@ -1461,6 +1567,680 @@ def api_stock_debug_item():
 
 
 # ─── SIINAS ──────────────────────────────────────────────────────────────────
+
+def _warehouse_qty_column(warehouse_id, wareitem_columns):
+    try:
+        column = f"QTY{int(warehouse_id):04d}"
+    except (TypeError, ValueError):
+        return None
+    return column if column in wareitem_columns else None
+
+
+def _warehouse_balance_expr(warehouse_id, item_expr):
+    return _warehouse_stock_expr(warehouse_id, item_expr)
+
+
+def _gudang_stock_expr(warehouse_id, item_expr="i.ITEMNO"):
+    return _warehouse_stock_expr(warehouse_id, item_expr)
+
+
+def _gudang_balance_source_sql(warehouse_id=None):
+    warehouse_filter = ""
+    if warehouse_id is not None:
+        warehouse_id = int(warehouse_id)
+        warehouse_filter = f"WHERE sw.WAREHOUSEID = {warehouse_id}"
+    return f"""
+        SELECT sw.WAREHOUSEID, sw.ITEMNO, SUM(sw.QTY) AS QTY
+        FROM SALDO_WHS sw
+        {warehouse_filter}
+        GROUP BY sw.WAREHOUSEID, sw.ITEMNO
+    """
+
+
+def _item_balance_quantity_expr(item_expr="i.ITEMNO"):
+    month_terms = " + ".join(
+        f"CASE WHEN EXTRACT(MONTH FROM CURRENT_DATE) >= {month} THEN COALESCE(ib.AMOUNT{month}, 0) ELSE 0 END"
+        for month in range(1, 13)
+    )
+    return f"""
+        COALESCE((
+            SELECT COALESCE(ib.OPENINGBAL, 0) + {month_terms}
+            FROM ITEMBALANCE ib
+            WHERE ib.ITEMNO = {item_expr}
+              AND ib.GLYEAR = EXTRACT(YEAR FROM CURRENT_DATE)
+        ), 0)
+    """
+
+
+def _build_gudang_rows(cur, search="", offset=0, limit=50, include_total=False):
+    cur.execute("""
+        SELECT WAREHOUSEID, NAME, DESCRIPTION, ADDRESS1, ADDRESS2, ADDRESS3,
+               PIC, BRANCHCODEWH, SUSPENDED
+        FROM WAREHS
+        ORDER BY NAME
+    """)
+    warehouses = cur.fetchall()
+    warehouse_columns = [
+        {
+            "warehouse_id": int(row[0] or 0),
+            "name": str(row[1] or "").strip(),
+            "field": f"qty_{int(row[0] or 0)}",
+        }
+        for row in warehouses
+    ]
+    stock_totals = {column["warehouse_id"]: [0, 0.0] for column in warehouse_columns}
+    cur.execute(f"""
+        SELECT stock.WAREHOUSEID, COUNT(*), COALESCE(SUM(stock.QTY), 0)
+        FROM ({_gudang_balance_source_sql()}) stock
+        JOIN ITEM i ON i.ITEMNO = stock.ITEMNO
+        WHERE ABS(COALESCE(stock.QTY, 0)) > 0.000001
+        GROUP BY stock.WAREHOUSEID
+    """)
+    for warehouse_id, total_items, total_qty in cur.fetchall():
+        warehouse_key = int(warehouse_id or 0)
+        if warehouse_key in stock_totals:
+            stock_totals[warehouse_key] = [int(total_items or 0), float(total_qty or 0)]
+
+    rows = []
+    for row in warehouses:
+        warehouse_id = int(row[0] or 0)
+        total_items, total_qty = stock_totals.get(warehouse_id, (0, 0.0))
+
+        address = ", ".join(
+            part for part in [
+                str(row[3] or "").strip(),
+                str(row[4] or "").strip(),
+                str(row[5] or "").strip(),
+            ]
+            if part
+        )
+        rows.append({
+            "warehouse_id": warehouse_id,
+            "name": str(row[1] or "").strip(),
+            "description": str(row[2] or "").strip(),
+            "address": address,
+            "pic": str(row[6] or "").strip(),
+            "branch_code": str(row[7] or "").strip(),
+            "status": "Nonaktif" if int(row[8] or 0) else "Aktif",
+            "total_items": total_items,
+            "total_qty": round(total_qty, 4),
+        })
+
+    term = str(search or "").strip().lower()
+    if term:
+        rows = [
+            row for row in rows
+            if term in str(row.get("warehouse_id", "")).lower()
+            or term in str(row.get("name", "")).lower()
+            or term in str(row.get("description", "")).lower()
+            or term in str(row.get("address", "")).lower()
+            or term in str(row.get("pic", "")).lower()
+            or term in str(row.get("branch_code", "")).lower()
+            or term in str(row.get("status", "")).lower()
+        ]
+
+    total = len(rows)
+    page_rows = rows[offset:offset + limit] if limit else rows
+    result = {"data": page_rows}
+    if include_total:
+        result["total"] = total
+        result["summary"] = {
+            "total_warehouses": total,
+            "active_warehouses": sum(1 for row in rows if row["status"] == "Aktif"),
+            "total_items": sum(int(row.get("total_items") or 0) for row in rows),
+            "total_qty": round(sum(float(row.get("total_qty") or 0) for row in rows), 4),
+        }
+    return result
+
+
+def _get_gudang_info(cur, warehouse_id):
+    cur.execute("""
+        SELECT WAREHOUSEID, NAME, DESCRIPTION, SUSPENDED
+        FROM WAREHS
+        WHERE WAREHOUSEID = ?
+    """, [warehouse_id])
+    row = cur.fetchone()
+    if not row:
+        return None
+    return {
+        "warehouse_id": int(row[0] or 0),
+        "name": str(row[1] or "").strip(),
+        "description": str(row[2] or "").strip(),
+        "status": "Nonaktif" if int(row[3] or 0) else "Aktif",
+    }
+
+
+def _get_gudang_qty_columns(cur):
+    cur.execute("""
+        SELECT WAREHOUSEID, NAME
+        FROM WAREHS
+        ORDER BY NAME
+    """)
+    warehouses = []
+    for row in cur.fetchall():
+        warehouse_id = int(row[0] or 0)
+        warehouses.append({
+            "warehouse_id": warehouse_id,
+            "name": str(row[1] or "").strip(),
+            "field": f"qty_{warehouse_id}",
+        })
+    return warehouses
+
+
+def _gudang_item_where(search, qty_expr, code_product_expr, require_stock=True):
+    conditions = []
+    params = []
+    if require_stock:
+        conditions.append(f"ABS({qty_expr}) > 0.000001")
+    if search:
+        normalized_search = _normalize_stock_code_search(search)
+        normalized_itemno_expr = _stock_normalized_code_expr("i.ITEMNO")
+        normalized_code_product_expr = _stock_normalized_code_expr(code_product_expr)
+        conditions.append(f"""(
+            LOWER(CAST(i.ITEMNO AS VARCHAR(255))) CONTAINING LOWER(?)
+            OR LOWER(CAST(COALESCE(i.ITEMDESCRIPTION, '') AS VARCHAR(255))) CONTAINING LOWER(?)
+            OR LOWER(CAST(COALESCE(i.ITEMDESCRIPTION2, '') AS VARCHAR(255))) CONTAINING LOWER(?)
+            OR LOWER(CAST(COALESCE(i.UNIT1, '') AS VARCHAR(255))) CONTAINING LOWER(?)
+            OR LOWER(CAST(COALESCE(c.NAME, '') AS VARCHAR(255))) CONTAINING LOWER(?)
+            OR LOWER(CAST({code_product_expr} AS VARCHAR(255))) CONTAINING LOWER(?)
+            OR {normalized_itemno_expr} CONTAINING ?
+            OR {normalized_code_product_expr} CONTAINING ?
+        )""")
+        params.extend([
+            search, search, search, search, search, search,
+            normalized_search, normalized_search,
+        ])
+    return " AND ".join(conditions) if conditions else "1 = 1", params
+
+
+def _fetch_page_gudang_quantities(cur, warehouse_columns, item_nos):
+    item_nos = [str(item_no or "").strip() for item_no in item_nos if str(item_no or "").strip()]
+    if not item_nos:
+        return {}
+
+    empty_quantities = {column["field"]: 0.0 for column in warehouse_columns}
+    raw_quantities = {item_no: dict(empty_quantities) for item_no in item_nos}
+    field_by_warehouse = {
+        int(column["warehouse_id"]): column["field"]
+        for column in warehouse_columns
+    }
+    placeholders = ",".join("?" for _ in item_nos)
+    cur.execute(f"""
+        SELECT moves.ITEMNO, moves.WAREHOUSEID, SUM(moves.QTY) AS QTY
+        FROM SALDO_WHS moves
+        JOIN ITEM i ON i.ITEMNO = moves.ITEMNO
+        WHERE moves.ITEMNO IN ({placeholders})
+        GROUP BY moves.ITEMNO, moves.WAREHOUSEID
+    """, item_nos)
+    for item_no, warehouse_id, qty in cur.fetchall():
+        item_key = str(item_no or "").strip()
+        field = field_by_warehouse.get(int(warehouse_id or 0))
+        if item_key in raw_quantities and field:
+            raw_quantities[item_key][field] = float(qty or 0)
+    return raw_quantities
+
+
+def _gudang_item_rows(rows, warehouse, warehouse_columns, qty_by_item=None):
+    qty_by_item = qty_by_item or {}
+    data = []
+    for row in rows:
+        item_no = str(row[0] or "").strip()
+        item_quantities = qty_by_item.get(item_no, {})
+        selected_qty = float(row[4] or 0)
+        if item_no in qty_by_item:
+            selected_qty = float(qty_by_item[item_no].get(f"qty_{warehouse['warehouse_id']}", selected_qty) or 0)
+        record = {
+            "warehouse_id": warehouse["warehouse_id"],
+            "warehouse_name": warehouse["name"],
+            "itemno": item_no,
+            "description": str(row[1] or "").strip(),
+            "unit": str(row[2] or "").strip(),
+            "category": str(row[3] or "").strip(),
+            "quantity": selected_qty,
+            "code_product": str(row[5] or "").strip(),
+            "total_quantity": float(row[6] or 0),
+            "warehouse_quantities": [],
+        }
+        for warehouse_column in warehouse_columns:
+            qty = float(item_quantities.get(warehouse_column["field"], 0) or 0)
+            record[warehouse_column["field"]] = qty
+            record["warehouse_quantities"].append({
+                "warehouse_id": warehouse_column["warehouse_id"],
+                "name": warehouse_column["name"],
+                "field": warehouse_column["field"],
+                "quantity": qty,
+            })
+        data.append(record)
+    return data
+
+
+def _warehouse_balance_source_sql(warehouse_id):
+    warehouse_id = int(warehouse_id)
+    return """
+        SELECT stock.ITEMNO AS itemno, stock.QTY AS qty
+        FROM ({balance_sql}) stock
+    """.format(balance_sql=_gudang_balance_source_sql(warehouse_id))
+
+
+def _fetch_gudang_items(warehouse_id, search="", offset=0, limit=50, include_total=False):
+    con = connect_easy_db()
+    cur = con.cursor()
+    warehouse = _get_gudang_info(cur, warehouse_id)
+    if not warehouse:
+        con.close()
+        return None
+
+    qty_expr = "COALESCE(whs.QTY, 0)"
+    total_qty_expr = _easy_stock_expr("i.ITEMNO")
+    code_product_expr = _stock_code_product_expr(cur)
+    warehouse_columns = _get_gudang_qty_columns(cur)
+    balance_sql = _gudang_balance_source_sql(warehouse_id)
+    item_where_sql, params = _gudang_item_where(search, qty_expr, code_product_expr, require_stock=True)
+    where_sql = f"""
+        {item_where_sql}
+    """
+    from_sql = """
+        FROM ({balance_sql}) whs
+        JOIN ITEM i ON i.ITEMNO = whs.ITEMNO
+        LEFT JOIN ITEMCATEGORY c ON c.CATEGORYID = i.CATEGORYID
+    """.format(balance_sql=balance_sql)
+
+    total = None
+    summary = None
+    if include_total:
+        cur.execute(f"""
+            SELECT COUNT(*), COALESCE(SUM({qty_expr}), 0)
+            {from_sql}
+            WHERE {where_sql}
+        """, params)
+        row = cur.fetchone() or [0, 0]
+        total = int(row[0] or 0)
+        summary = {
+            "total_items": total,
+            "total_qty": round(float(row[1] or 0), 4),
+        }
+
+    paging_sql = "FIRST ? SKIP ?" if limit else ""
+    paging_params = [limit, offset] if limit else []
+    cur.execute(f"""
+        SELECT {paging_sql}
+            i.ITEMNO,
+            i.ITEMDESCRIPTION,
+            i.UNIT1,
+            c.NAME,
+            {qty_expr},
+            {code_product_expr},
+            {total_qty_expr}
+        {from_sql}
+        WHERE {where_sql}
+        ORDER BY i.ITEMNO
+    """, paging_params + params)
+    rows = cur.fetchall()
+    qty_by_item = _fetch_page_gudang_quantities(cur, warehouse_columns, [row[0] for row in rows])
+    con.close()
+    result = {
+        "warehouse": warehouse,
+        "warehouses": [
+            {
+                "warehouse_id": column["warehouse_id"],
+                "name": column["name"],
+                "field": column["field"],
+            }
+            for column in warehouse_columns
+        ],
+        "data": _gudang_item_rows(rows, warehouse, warehouse_columns, qty_by_item),
+    }
+    if include_total:
+        result["total"] = total
+        result["summary"] = summary
+    return result
+
+
+def _easy_item_type_label(value):
+    try:
+        return {
+            0: "Persediaan",
+            1: "Non-Persediaan",
+            2: "Servis",
+            3: "Grup",
+        }.get(int(value or 0), str(value or ""))
+    except (TypeError, ValueError):
+        return str(value or "")
+
+
+def _easy_inventory_type_label(value):
+    try:
+        return {
+            0: "Barang Jadi",
+            1: "Barang Lain-Lain",
+            2: "Barang Setengah Jadi",
+            3: "Bahan Baku Pembantu",
+            4: "Bahan Baku",
+        }.get(int(value or 0), str(value or ""))
+    except (TypeError, ValueError):
+        return str(value or "")
+
+
+def _fetch_easy_accounting_items(search="", offset=0, limit=50, include_total=False, hide_zero=False):
+    con = connect_easy_db()
+    cur = con.cursor()
+    code_product_expr = _stock_code_product_expr(cur)
+    stock_qty_expr = "COALESCE(i.QUANTITY, 0)"
+    conditions = [
+        "COALESCE(i.SUSPENDED, 0) = 0",
+        "COALESCE(i.ITEMTYPE, 0) = 0",
+    ]
+    params = []
+    if hide_zero:
+        conditions.append(f"ABS({stock_qty_expr}) > 0.000001")
+    if search:
+        normalized_search = _normalize_stock_code_search(search)
+        normalized_itemno_expr = _stock_normalized_code_expr("i.ITEMNO")
+        normalized_code_product_expr = _stock_normalized_code_expr(code_product_expr)
+        conditions.append(f"""(
+            LOWER(CAST(i.ITEMNO AS VARCHAR(255))) CONTAINING LOWER(?)
+            OR LOWER(CAST(COALESCE(i.ITEMDESCRIPTION, '') AS VARCHAR(255))) CONTAINING LOWER(?)
+            OR LOWER(CAST(COALESCE(i.ITEMDESCRIPTION2, '') AS VARCHAR(255))) CONTAINING LOWER(?)
+            OR LOWER(CAST(COALESCE(i.UNIT1, '') AS VARCHAR(255))) CONTAINING LOWER(?)
+            OR LOWER(CAST(COALESCE(c.NAME, '') AS VARCHAR(255))) CONTAINING LOWER(?)
+            OR LOWER(CAST({code_product_expr} AS VARCHAR(255))) CONTAINING LOWER(?)
+            OR {normalized_itemno_expr} CONTAINING ?
+            OR {normalized_code_product_expr} CONTAINING ?
+        )""")
+        params.extend([
+            search, search, search, search, search, search,
+            normalized_search, normalized_search,
+        ])
+
+    where_sql = " AND ".join(conditions)
+    total = None
+    if include_total:
+        cur.execute(f"""
+            SELECT COUNT(*)
+            FROM ITEM i
+            LEFT JOIN ITEMCATEGORY c ON c.CATEGORYID = i.CATEGORYID
+            WHERE {where_sql}
+        """, params)
+        total = int((cur.fetchone() or [0])[0] or 0)
+
+    paging_sql = "FIRST ? SKIP ?" if limit else ""
+    paging_params = [limit, offset] if limit else []
+    cur.execute(f"""
+        SELECT {paging_sql}
+            i.ITEMNO,
+            i.ITEMDESCRIPTION,
+            i.ITEMDESCRIPTION2,
+            {stock_qty_expr},
+            i.UNIT1,
+            {code_product_expr},
+            i.ITEMTYPE,
+            c.NAME,
+            i.TIPEPERSEDIAAN,
+            COALESCE(i.SUSPENDED, 0)
+        FROM ITEM i
+        LEFT JOIN ITEMCATEGORY c ON c.CATEGORYID = i.CATEGORYID
+        WHERE {where_sql}
+        ORDER BY i.ITEMNO
+    """, paging_params + params)
+    raw_rows = cur.fetchall()
+    warehouse_columns = _get_gudang_qty_columns(cur)
+    qty_by_item = _fetch_page_gudang_quantities(cur, warehouse_columns, [row[0] for row in raw_rows])
+    rows = []
+    for index, row in enumerate(raw_rows, start=offset + 1):
+        item_no = str(row[0] or "").strip()
+        item_quantities = qty_by_item.get(item_no, {})
+        record = {
+            "row_no": index,
+            "itemno": item_no,
+            "description": str(row[1] or "").strip(),
+            "description2": str(row[2] or "").strip(),
+            "quantity": round(float(row[3] or 0), 4),
+            "unit": str(row[4] or "").strip(),
+            "code_product": str(row[5] or "").strip(),
+            "item_type": _easy_item_type_label(row[6]),
+            "category": str(row[7] or "").strip(),
+            "inventory_type": _easy_inventory_type_label(row[8]),
+            "suspended": int(row[9] or 0),
+            "warehouse_quantities": [],
+        }
+        for warehouse_column in warehouse_columns:
+            qty = round(float(item_quantities.get(warehouse_column["field"], 0) or 0), 4)
+            record[warehouse_column["field"]] = qty
+            record["warehouse_quantities"].append({
+                "warehouse_id": warehouse_column["warehouse_id"],
+                "name": warehouse_column["name"],
+                "field": warehouse_column["field"],
+                "quantity": qty,
+            })
+        rows.append(record)
+    con.close()
+    result = {
+        "data": rows,
+        "warehouses": [
+            {
+                "warehouse_id": column["warehouse_id"],
+                "name": column["name"],
+                "field": column["field"],
+            }
+            for column in warehouse_columns
+        ],
+    }
+    if include_total:
+        result["total"] = total
+    return result
+
+
+def _fetch_item_warehouse_breakdown(item_no):
+    normalized_item_no = str(item_no or "").strip()
+    if not normalized_item_no:
+        return None
+
+    con = connect_easy_db()
+    cur = con.cursor()
+    cur.execute("""
+        SELECT FIRST 1 ITEMNO, ITEMDESCRIPTION, ITEMDESCRIPTION2, UNIT1
+        FROM ITEM
+        WHERE UPPER(TRIM(ITEMNO)) = UPPER(TRIM(?))
+    """, [normalized_item_no])
+    item = cur.fetchone()
+    if not item:
+        con.close()
+        return None
+
+    cur.execute("""
+        SELECT
+            wh.WAREHOUSEID,
+            wh.NAME,
+            COALESCE((
+                SELECT SUM(sw.QTY)
+                FROM SALDO_WHS sw
+                WHERE sw.WAREHOUSEID = wh.WAREHOUSEID
+                  AND UPPER(TRIM(sw.ITEMNO)) = UPPER(TRIM(?))
+            ), 0)
+        FROM WAREHS wh
+        WHERE wh.WAREHOUSEID IS NOT NULL
+        ORDER BY
+            CASE WHEN UPPER(TRIM(wh.NAME)) = 'CENTRE' THEN 0 ELSE 1 END,
+            CASE UPPER(TRIM(wh.NAME))
+                WHEN 'PUTAT' THEN 1
+                WHEN 'PRODUKSI' THEN 2
+                WHEN 'SURABAYA' THEN 3
+                WHEN 'SETENGAH JADI' THEN 4
+                ELSE 5
+            END,
+            wh.NAME
+    """, [normalized_item_no])
+    warehouses = [
+        {
+            "warehouse_id": int(row[0] or 0),
+            "warehouse_name": str(row[1] or "").strip(),
+            "quantity": round(float(row[2] or 0), 4),
+        }
+        for row in cur.fetchall()
+    ]
+    con.close()
+    return {
+        "itemno": str(item[0] or "").strip(),
+        "description": str(item[1] or "").strip(),
+        "description2": str(item[2] or "").strip(),
+        "unit": str(item[3] or "").strip(),
+        "total_quantity": round(sum(row["quantity"] for row in warehouses), 4),
+        "warehouses": warehouses,
+    }
+
+
+@app.route("/api/gudang")
+@jwt_required()
+def api_gudang():
+    if not check_permission("gudang"):
+        return jsonify({"message": "Akses ditolak"}), 403
+    try:
+        search = request.args.get("search", "")
+        offset = int(request.args.get("offset", 0))
+        limit = int(request.args.get("limit", 50))
+        include_total = request.args.get("include_total", "0") == "1"
+
+        con = fdb.connect(**DB_CONFIG)
+        cur = con.cursor()
+        result = _build_gudang_rows(cur, search, offset, limit, include_total)
+        con.close()
+
+        data = filter_record_columns("gudang", result.get("data", []))
+        if include_total:
+            return jsonify({
+                "data": data,
+                "total": result.get("total", len(data)),
+                "summary": result.get("summary", {}),
+            })
+        return jsonify(data)
+    except Exception as e:
+        print(f"Error api_gudang: {e}")
+        return jsonify({"data": [], "total": 0, "summary": {}, "error": str(e)})
+
+
+@app.route("/api/gudang/export")
+@jwt_required()
+def api_gudang_export():
+    if not check_permission("gudang"):
+        return jsonify({"message": "Akses ditolak"}), 403
+    try:
+        search = request.args.get("search", "")
+        con = fdb.connect(**DB_CONFIG)
+        cur = con.cursor()
+        result = _build_gudang_rows(cur, search, 0, 0, True)
+        con.close()
+        return jsonify({
+            "data": filter_record_columns("gudang", result.get("data", [])),
+            "total_rows": result.get("total", 0),
+            "summary": result.get("summary", {}),
+        })
+    except Exception as e:
+        print(f"Error api_gudang_export: {e}")
+        return jsonify({"data": [], "total_rows": 0, "summary": {}, "error": str(e)})
+
+
+@app.route("/api/gudang/items")
+@jwt_required()
+def api_gudang_easy_items():
+    if not check_permission("gudang"):
+        return jsonify({"message": "Akses ditolak"}), 403
+    try:
+        result = _fetch_easy_accounting_items(
+            search=request.args.get("search", ""),
+            offset=int(request.args.get("offset", 0)),
+            limit=int(request.args.get("limit", 50)),
+            include_total=request.args.get("include_total", "0") == "1",
+            hide_zero=request.args.get("hide_zero", "0") == "1",
+        )
+        data = filter_record_columns("gudang", result.get("data", []))
+        if "total" in result:
+            return jsonify({
+                "data": data,
+                "warehouses": result.get("warehouses", []),
+                "total": result.get("total", len(data)),
+            })
+        return jsonify({
+            "data": data,
+            "warehouses": result.get("warehouses", []),
+        })
+    except Exception as e:
+        print(f"Error api_gudang_easy_items: {e}")
+        return jsonify({"data": [], "total": 0, "error": str(e)}), 500
+
+
+@app.route("/api/gudang/items/<path:item_no>/warehouses")
+@jwt_required()
+def api_gudang_item_warehouses(item_no):
+    if not check_permission("gudang"):
+        return jsonify({"message": "Akses ditolak"}), 403
+    try:
+        result = _fetch_item_warehouse_breakdown(item_no)
+        if not result:
+            return jsonify({"message": "Barang tidak ditemukan"}), 404
+        return jsonify(result)
+    except Exception as e:
+        print(f"Error api_gudang_item_warehouses: {e}")
+        return jsonify({"warehouses": [], "error": str(e)}), 500
+
+
+@app.route("/api/gudang/<int:warehouse_id>/items")
+@jwt_required()
+def api_gudang_items(warehouse_id):
+    if not check_permission("gudang"):
+        return jsonify({"message": "Akses ditolak"}), 403
+    try:
+        search = request.args.get("search", "")
+        offset = int(request.args.get("offset", 0))
+        limit = int(request.args.get("limit", 50))
+        include_total = request.args.get("include_total", "0") == "1"
+        result = _fetch_gudang_items(warehouse_id, search, offset, limit, include_total)
+        if result is None:
+            return jsonify({"message": "Gudang tidak ditemukan"}), 404
+        data = filter_record_columns("gudang", result.get("data", []))
+        if include_total:
+            return jsonify({
+                "warehouse": result.get("warehouse", {}),
+                "warehouses": result.get("warehouses", []),
+                "data": data,
+                "total": result.get("total", len(data)),
+                "summary": result.get("summary", {}),
+            })
+        return jsonify({
+            "warehouse": result.get("warehouse", {}),
+            "warehouses": result.get("warehouses", []),
+            "data": data,
+        })
+    except Exception as e:
+        print(f"Error api_gudang_items: {e}")
+        return jsonify({"data": [], "total": 0, "summary": {}, "error": str(e)}), 500
+
+
+@app.route("/api/gudang/<int:warehouse_id>/items/export")
+@jwt_required()
+def api_gudang_items_export(warehouse_id):
+    if not check_permission("gudang"):
+        return jsonify({"message": "Akses ditolak"}), 403
+    try:
+        result = _fetch_gudang_items(
+            warehouse_id,
+            search=request.args.get("search", ""),
+            offset=0,
+            limit=0,
+            include_total=True,
+        )
+        if result is None:
+            return jsonify({"message": "Gudang tidak ditemukan"}), 404
+        return jsonify({
+            "warehouse": result.get("warehouse", {}),
+            "warehouses": result.get("warehouses", []),
+            "data": filter_record_columns("gudang", result.get("data", [])),
+            "total_rows": result.get("total", 0),
+            "summary": result.get("summary", {}),
+        })
+    except Exception as e:
+        print(f"Error api_gudang_items_export: {e}")
+        return jsonify({"data": [], "total_rows": 0, "summary": {}, "error": str(e)}), 500
+
 
 SIINAS_EXTRA_FIELD_LABELS = {
     "ITEMRESERVED1": "Code Product",
@@ -1584,6 +2364,15 @@ def _siinas_build_doc_resolvers(cur):
             JOIN APINV ai ON ai.APINVOICEID = det.APINVOICEID
             WHERE det.ITEMHISTID = ?
             ORDER BY ai.INVOICEDATE DESC, ai.INVOICENO DESC
+        """))
+
+    if _table_has_columns(cur, "ITADJDET", ("ITEMHISTID", "ITEMADJID")) and _table_has_columns(cur, "ITEMADJ", ("ITEMADJID", "ADJNO")):
+        itemhist_resolvers.append(("ITEMADJ", """
+            SELECT FIRST 1 adj.ADJNO
+            FROM ITADJDET det
+            JOIN ITEMADJ adj ON adj.ITEMADJID = det.ITEMADJID
+            WHERE det.ITEMHISTID = ?
+            ORDER BY adj.ADJDATE DESC, adj.ADJNO DESC
         """))
 
     if _table_has_columns(cur, "ITEMADJDET", ("ITEMHISTID", "ITEMADJID")):
@@ -2135,7 +2924,7 @@ def _siinas_normalize_unit(value):
 
 
 SIINAS_REFERENSI_FILE = Path(__file__).resolve().parent / "data" / "Referensi Data SIinas.xlsx"
-SIINAS_VALIDASI_SATUAN3_FILE = Path(__file__).resolve().parent / "data" / "Validasi Material Rasio Ke 3.xlsx"
+SIINAS_VALIDASI_SATUAN3_FILE = Path(__file__).resolve().parent / "data" / "Tabel Barang Lokal.xlsx"
 
 
 def _xlsx_col_index(cell_ref):
@@ -2245,72 +3034,114 @@ def _load_siinas_validasi_satuan3_reference():
         rows.append(values)
 
     result = []
-    seen = set()
     for row in rows[1:]:
-        item_no = str(row.get(0, "") or "").strip()
-        if not item_no or item_no in seen:
+        item_no = str(row.get(1, "") or "").strip()
+        if not item_no:
             continue
-        seen.add(item_no)
         result.append({
+            "no_urut": _siinas_parse_number(row.get(0, "")),
             "no_barang": item_no,
-            "rasio_3_excel": _siinas_parse_number(row.get(1, "")),
-            "unit_3_excel": str(row.get(2, "") or "").strip(),
+            "deskripsi_persediaan": str(row.get(2, "") or "").strip(),
+            "unit_1": str(row.get(3, "") or "").strip(),
+            "rasio_2_barang": _siinas_parse_number(row.get(4, "")),
+            "unit_2": str(row.get(5, "") or "").strip(),
+            "rasio_3_barang": _siinas_parse_number(row.get(6, "")),
+            "unit_3": str(row.get(7, "") or "").strip(),
         })
     return result
 
 
+def _ensure_siinas_validasi_ratio_override_table():
+    con = connect_dashboard_db()
+    cur = con.cursor()
+    timestamp_type = "TIMESTAMP" if DASHBOARD_DB_KIND == "postgres" else "TEXT"
+    cur.execute(f"""
+        CREATE TABLE IF NOT EXISTS siinas_validasi_ratio_overrides (
+            no_barang TEXT PRIMARY KEY,
+            rasio_2_barang DOUBLE PRECISION NOT NULL DEFAULT 0,
+            rasio_3_barang DOUBLE PRECISION NOT NULL,
+            updated_at {timestamp_type} NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_by TEXT
+        )
+    """)
+    con.commit()
+    con.close()
+
+
+def _get_siinas_validasi_ratio_overrides():
+    _ensure_siinas_validasi_ratio_override_table()
+    con = connect_dashboard_db()
+    cur = con.cursor()
+    try:
+        cur.execute("""
+            SELECT no_barang, rasio_2_barang, rasio_3_barang, updated_at, updated_by
+            FROM siinas_validasi_ratio_overrides
+        """)
+        return {
+            str(row[0] or "").strip(): {
+                "rasio_2_barang": float(row[1] or 0),
+                "rasio_3_barang": float(row[2] or 0),
+                "rasio_diedit": True,
+                "rasio_updated_at": str(row[3] or ""),
+                "rasio_updated_by": str(row[4] or "").strip(),
+            }
+            for row in cur.fetchall()
+            if str(row[0] or "").strip()
+        }
+    finally:
+        con.close()
+
+
+def _get_siinas_validasi_satuan3_rows():
+    overrides = _get_siinas_validasi_ratio_overrides()
+    return [
+        {**row, **overrides.get(str(row.get("no_barang") or "").strip(), {})}
+        for row in _load_siinas_validasi_satuan3_reference()
+    ]
+
+
+def _save_siinas_validasi_ratio_override(no_barang, rasio_2_barang, rasio_3_barang, username=""):
+    _ensure_siinas_validasi_ratio_override_table()
+    con = connect_dashboard_db()
+    cur = con.cursor()
+    conflict_target = "(no_barang)" if DASHBOARD_DB_KIND == "postgres" else "(no_barang)"
+    excluded_prefix = "EXCLUDED" if DASHBOARD_DB_KIND == "postgres" else "excluded"
+    cur.execute(f"""
+        INSERT INTO siinas_validasi_ratio_overrides (
+            no_barang, rasio_2_barang, rasio_3_barang, updated_at, updated_by
+        ) VALUES (?, ?, ?, CURRENT_TIMESTAMP, ?)
+        ON CONFLICT {conflict_target} DO UPDATE SET
+            rasio_2_barang = {excluded_prefix}.rasio_2_barang,
+            rasio_3_barang = {excluded_prefix}.rasio_3_barang,
+            updated_at = CURRENT_TIMESTAMP,
+            updated_by = {excluded_prefix}.updated_by
+    """, (no_barang, rasio_2_barang, rasio_3_barang, username or ""))
+    con.commit()
+    con.close()
+
+
 def _siinas_validasi_satuan3_ratio_map():
     return {
-        str(row.get("no_barang") or "").strip(): float(row.get("rasio_3_excel") or 0)
-        for row in _load_siinas_validasi_satuan3_reference()
+        str(row.get("no_barang") or "").strip(): float(row.get("rasio_3_barang") or 0)
+        for row in _get_siinas_validasi_satuan3_rows()
         if str(row.get("no_barang") or "").strip()
-        and _siinas_normalize_unit(row.get("unit_3_excel")) == _SIINAS_REQUIRED_SATUAN3_UNIT
-        and float(row.get("rasio_3_excel") or 0) > 0
+        and _siinas_normalize_unit(row.get("unit_3")) == _SIINAS_REQUIRED_SATUAN3_UNIT
+        and float(row.get("rasio_3_barang") or 0) > 0
     }
 
 
 def _get_siinas_validasi_satuan3(search="", offset=0, limit=50):
-    references = _load_siinas_validasi_satuan3_reference()
-    item_nos = [row["no_barang"] for row in references]
-    easy_by_item = {}
-
-    con = connect_easy_db()
-    cur = con.cursor()
-    try:
-        item_columns = _get_table_columns(cur, "ITEM")
-        desc_col = _siinas_pick_column(item_columns, ("ITEMDESCRIPTION", "DESCRIPTION", "ITEMDESC"))
-
-        if desc_col:
-            select_desc = f"i.{_identifier(desc_col)}" if desc_col else "CAST('' AS VARCHAR(255))"
-            for start in range(0, len(item_nos), 300):
-                chunk = item_nos[start:start + 300]
-                cur.execute(f"""
-                    SELECT
-                        i.ITEMNO,
-                        {select_desc}
-                    FROM ITEM i
-                    WHERE i.ITEMNO IN ({_build_in_clause(chunk)})
-                """, chunk)
-                for item_no, description in cur.fetchall():
-                    easy_by_item[str(item_no or "").strip()] = str(description or "").strip()
-    finally:
-        con.close()
-
-    rows = []
-    for ref in references:
-        row = {
-            **ref,
-            "deskripsi_barang": easy_by_item.get(ref["no_barang"], ""),
-        }
-        rows.append(row)
+    rows = _get_siinas_validasi_satuan3_rows()
 
     term = str(search or "").strip().lower()
     if term:
         rows = [
             row for row in rows
             if term in str(row.get("no_barang", "")).lower()
-            or term in str(row.get("deskripsi_barang", "")).lower()
-            or term in str(row.get("unit_3_excel", "")).lower()
+            or term in str(row.get("deskripsi_persediaan", "")).lower()
+            or term in str(row.get("unit_1", "")).lower()
+            or term in str(row.get("unit_2", "")).lower()
+            or term in str(row.get("unit_3", "")).lower()
         ]
 
     total = len(rows)
@@ -2483,52 +3314,6 @@ def _siinas_resolve_latest_supplier_by_item(cur, item_nos):
     return detail_by_item
 
 
-@app.route("/api/siinas/barang")
-@jwt_required()
-def api_siinas_barang():
-    if not check_permission("siinas"):
-        return jsonify({"message": "Akses ditolak"}), 403
-    try:
-        search = request.args.get("search", "")
-        offset = int(request.args.get("offset", 0))
-        limit = int(request.args.get("limit", 50))
-        sort_field = request.args.get("sort_field", "")
-        sort_order = request.args.get("sort_order", "")
-        return jsonify(_get_siinas_barang(
-            search=search,
-            offset=offset,
-            limit=limit,
-            sort_field=sort_field,
-            sort_order=sort_order,
-        ))
-    except Exception as e:
-        print(f"Error api_siinas_barang: {e}")
-        return jsonify({"data": [], "total": 0, "extra_columns": [], "error": str(e)}), 500
-
-
-@app.route("/api/siinas/valuasi-rinci")
-@jwt_required()
-def api_siinas_valuasi_rinci():
-    if not check_permission("siinas"):
-        return jsonify({"message": "Akses ditolak"}), 403
-    try:
-        search = request.args.get("search", "")
-        offset = int(request.args.get("offset", 0))
-        limit = int(request.args.get("limit", 50))
-        date_from = request.args.get("date_from", "")
-        date_to = request.args.get("date_to", "")
-        return jsonify(_get_siinas_valuasi_rinci(
-            search=search,
-            offset=offset,
-            limit=limit,
-            date_from=date_from,
-            date_to=date_to,
-        ))
-    except Exception as e:
-        print(f"Error api_siinas_valuasi_rinci: {e}")
-        return jsonify({"data": [], "total": 0, "error": str(e)}), 500
-
-
 @app.route("/api/siinas/referensi")
 @jwt_required()
 def api_siinas_referensi():
@@ -2566,7 +3351,56 @@ def api_siinas_validasi_material_satuan3():
         return jsonify({"data": [], "total": 0, "summary": {}, "error": str(e)}), 500
 
 
-def _get_siinas_monitoring_report_full(search="", offset=0, limit=50, date_from="", date_to="", exact_code=None):
+@app.route("/api/siinas/validasi-material-satuan-3/rasio", methods=["POST"])
+@jwt_required()
+def api_siinas_update_validasi_material_ratio():
+    if not check_permission("siinas"):
+        return jsonify({"message": "Akses ditolak"}), 403
+    try:
+        payload = request.get_json(silent=True) or {}
+        no_barang = str(payload.get("no_barang") or "").strip()
+        if not no_barang:
+            return jsonify({"message": "No. Barang wajib diisi"}), 400
+
+        try:
+            rasio_2_barang = float(payload.get("rasio_2_barang") or 0)
+            rasio_3_barang = float(payload.get("rasio_3_barang") or 0)
+        except (TypeError, ValueError):
+            return jsonify({"message": "Rasio Barang harus berupa angka"}), 400
+
+        if rasio_2_barang < 0:
+            return jsonify({"message": "Rasio 2 Barang tidak boleh negatif"}), 400
+        if rasio_3_barang <= 0:
+            return jsonify({"message": "Rasio 3 Barang harus lebih besar dari 0"}), 400
+
+        username = get_current_user().get("username", "")
+        _save_siinas_validasi_ratio_override(
+            no_barang,
+            rasio_2_barang,
+            rasio_3_barang,
+            username,
+        )
+        log_activity(
+            username=username,
+            action="update",
+            module="siinas",
+            description="Update rasio data validasi material",
+            metadata={
+                "no_barang": no_barang,
+                "rasio_2_barang": rasio_2_barang,
+                "rasio_3_barang": rasio_3_barang,
+            },
+        )
+        return jsonify({"message": "Rasio Barang berhasil diperbarui"})
+    except Exception as e:
+        print(f"Error api_siinas_update_validasi_material_ratio: {e}")
+        return jsonify({"message": "Gagal memperbarui Rasio Barang", "error": str(e)}), 500
+
+
+def _get_siinas_monitoring_report_full(
+    search="", offset=0, limit=50, date_from="", date_to="", exact_code=None, exact_codes=None,
+    stock_date_from="", stock_date_to="",
+):
     """Ringkasan hasil produksi per tanggal GP dan Code Product."""
     validasi_satuan3_ratio_by_item = _siinas_validasi_satuan3_ratio_map()
     con = fdb.connect(**DB_CONFIG)
@@ -2574,12 +3408,16 @@ def _get_siinas_monitoring_report_full(search="", offset=0, limit=50, date_from=
     try:
         item_columns = _get_table_columns(cur, "ITEM")
         code_product_col = _siinas_pick_column(item_columns, ("CODEPRODUCT", "ITEMRESERVED1", "RESERVED1"))
+        result_product_col = _siinas_pick_column(item_columns, ("ITEMRESERVED1", "RESERVED1"))
+        result_export_product_col = _siinas_pick_column(item_columns, ("ITEMRESERVED6", "RESERVED6", "PRODUCT"))
         hs_code_col = _siinas_pick_column(item_columns, ("HSCODE", "HS_CODE", "ITEMRESERVED4", "RESERVED4"))
         kbli_col = _siinas_pick_column(item_columns, ("KBLI", "ITEMRESERVED5", "RESERVED5"))
+        product_col = _siinas_pick_column(item_columns, ("PRODUCT", "ITEMRESERVED6", "RESERVED6"))
         unit2_col = _siinas_pick_column(item_columns, ("UNIT2", "ITEMUNIT2", "SECONDUNIT"))
         unit3_col = _siinas_pick_column(item_columns, ("UNIT3", "ITEMUNIT3", "THIRDUNIT"))
         ratio2_col = _siinas_pick_column(item_columns, ("RATIO2", "UNITRATIO2", "RATIOUNIT2"))
         ratio3_col = _siinas_pick_column(item_columns, ("RATIO3", "UNITRATIO3", "RATIOUNIT3"))
+        inventory_type_col = _siinas_pick_column(item_columns, ("TIPEPERSEDIAAN", "INVENTORYTYPE", "ITEMTYPE"))
         account_col = _siinas_pick_column(item_columns, (
             "INVENTORYACCOUNT", "INVENTORYACCOUNTNO", "INVENTORYGLACCOUNT",
             "INVENTORYGLACCOUNTNO", "INVENTORYGLACCNT", "INVENTORYACCNT",
@@ -2629,6 +3467,7 @@ def _get_siinas_monitoring_report_full(search="", offset=0, limit=50, date_from=
         def item_expr(column, alias="i", fallback="NULL"):
             return f"{alias}.{_identifier(column)}" if column else fallback
 
+        result_account_display_expr = material_account_display_expr.replace("c.NAME", "rc.NAME")
         conditions = [
             "prd.ITEMNO IS NOT NULL",
             "prd.WODETID IS NOT NULL",
@@ -2641,7 +3480,26 @@ def _get_siinas_monitoring_report_full(search="", offset=0, limit=50, date_from=
         if date_to:
             conditions.append("pr.RESULTDATE <= ?")
             params.append(date_to)
-        if exact_code is not None:
+        normalized_exact_codes = [
+            str(code or "").strip()
+            for code in (exact_codes or [])
+        ]
+        if normalized_exact_codes:
+            include_empty = "__EMPTY__" in normalized_exact_codes
+            non_empty_codes = [code for code in normalized_exact_codes if code != "__EMPTY__"]
+            exact_code_conditions = []
+            if non_empty_codes:
+                exact_code_conditions.append(
+                    f"UPPER(TRIM(CAST({item_expr(code_product_col)} AS VARCHAR(255)))) "
+                    f"IN ({_build_in_clause(non_empty_codes)})"
+                )
+                params.extend(code.upper() for code in non_empty_codes)
+            if include_empty:
+                exact_code_conditions.append(
+                    f"COALESCE(TRIM(CAST({item_expr(code_product_col)} AS VARCHAR(255))), '') = ''"
+                )
+            conditions.append(f"({' OR '.join(exact_code_conditions)})")
+        elif exact_code is not None:
             if exact_code == "__EMPTY__":
                 conditions.append(f"COALESCE(TRIM(CAST({item_expr(code_product_col)} AS VARCHAR(255))), '') = ''")
             else:
@@ -2656,7 +3514,10 @@ def _get_siinas_monitoring_report_full(search="", offset=0, limit=50, date_from=
                 pr.RESULTDATE,
                 CAST({item_expr(code_product_col)} AS VARCHAR(255)),
                 CAST({item_expr(kbli_col)} AS VARCHAR(255)),
-                CAST({item_expr(_siinas_pick_column(item_columns, ("PRODUCT", "ITEMRESERVED6", "RESERVED6")))} AS VARCHAR(255)),
+                CAST({item_expr(result_product_col)} AS VARCHAR(255)),
+                CAST({item_expr(result_export_product_col)} AS VARCHAR(255)),
+                CAST(({result_account_display_expr}) AS VARCHAR(255)),
+                CAST({item_expr(inventory_type_col, fallback="''")} AS VARCHAR(50)),
                 CAST({item_expr(unit2_col)} AS VARCHAR(255)),
                 {item_expr(ratio2_col, fallback='0')},
                 CAST({item_expr(unit3_col)} AS VARCHAR(255)),
@@ -2680,6 +3541,7 @@ def _get_siinas_monitoring_report_full(search="", offset=0, limit=50, date_from=
             JOIN PRODRESULTDET prd ON prd.PRODRESULTID = pr.ID
             LEFT JOIN ITEM i ON i.ITEMNO = prd.ITEMNO
             LEFT JOIN ITEMCATEGORY rc ON rc.CATEGORYID = i.CATEGORYID
+            {' '.join(material_account_joins)}
             LEFT JOIN WODET wd ON wd.ID = prd.WODETID
             LEFT JOIN WO wo ON wo.ID = wd.WOID
             WHERE {' AND '.join(conditions)}
@@ -2690,7 +3552,8 @@ def _get_siinas_monitoring_report_full(search="", offset=0, limit=50, date_from=
         all_wodet_ids = set()
         for row in cur.fetchall():
             (
-                result_date, code_product, result_kbli, result_product,
+                result_date, code_product, result_kbli, result_product, result_export_product,
+                result_account, result_inventory_type,
                 result_unit2, result_ratio2, result_unit3, result_ratio3,
                 wodet_id, result_qty, result_unit_cost,
                 result_no, result_description, result_item_no, result_unit,
@@ -2732,6 +3595,10 @@ def _get_siinas_monitoring_report_full(search="", offset=0, limit=50, date_from=
                 "nama_barang_hasil": str(result_item_name or "").strip(),
                 "kbli": str(result_kbli or "").strip(),
                 "produk_barang_jadi": str(result_product or "").strip(),
+                "produk_jadi_export": str(result_export_product or "").strip(),
+                "kategori_export": str(result_product or "").strip(),
+                "akun_persediaan_barang": str(result_account or "").strip(),
+                "tipe_persediaan_barang": str(result_inventory_type or "").strip(),
                 "unit_2": str(result_unit2 or "").strip(),
                 "rasio_2_barang": float(result_ratio2 or 0),
                 "unit_3": str(result_unit3 or "").strip(),
@@ -2767,8 +3634,10 @@ def _get_siinas_monitoring_report_full(search="", offset=0, limit=50, date_from=
                     MAX(i.ITEMDESCRIPTION),
                     COALESCE((SELECT SUM(h.QUANTITY) FROM ITEMHIST h WHERE h.ITEMNO = w.ITEMNO), 0),
                     MAX({material_account_display_expr}),
+                    MAX(CAST({item_expr(inventory_type_col, fallback="''")} AS VARCHAR(50))),
                     MAX(CAST({item_expr(hs_code_col, fallback="''")} AS VARCHAR(255))),
                     MAX(CAST({item_expr(kbli_col, fallback="''")} AS VARCHAR(255))),
+                    MAX(CAST({item_expr(product_col, fallback="''")} AS VARCHAR(255))),
                     MAX(i.UNIT1),
                     MAX({item_expr(unit2_col)}),
                     MAX({item_expr(unit3_col)}),
@@ -2792,15 +3661,228 @@ def _get_siinas_monitoring_report_full(search="", offset=0, limit=50, date_from=
                     "description": str(row[5] or "").strip(),
                     "stok_akhir": float(row[6] or 0),
                     "akun_persediaan": str(row[7] or "").strip(),
-                    "hs_code": str(row[8] or "").strip(),
-                    "kbli": str(row[9] or "").strip(),
-                    "unit1": row[10],
-                    "unit2": row[11],
-                    "unit3": row[12],
-                    "ratio2": float(row[13] or 0),
-                    "ratio3": float(row[14] or 0),
-                    "supplier_ref": str(row[15] or "").strip(),
+                    "tipe_persediaan_barang": str(row[8] or "").strip(),
+                    "hs_code": str(row[9] or "").strip(),
+                    "kbli": str(row[10] or "").strip(),
+                    "produk_jadi": str(row[11] or "").strip(),
+                    "unit1": row[12],
+                    "unit2": row[13],
+                    "unit3": row[14],
+                    "ratio2": float(row[15] or 0),
+                    "ratio3": float(row[16] or 0),
+                    "supplier_ref": str(row[17] or "").strip(),
                 })
+
+        material_item_nos = sorted({
+            material.get("itemno")
+            for materials in materials_by_wodet.values()
+            for material in materials
+            if material.get("itemno")
+        })
+        itemhist_resolvers, invoice_resolvers = _siinas_build_doc_resolvers(cur)
+        fifo_cost_by_wodet_item = {}
+        for start in range(0, len(wodet_ids), 900):
+            chunk = wodet_ids[start:start + 900]
+            if not chunk:
+                continue
+            cur.execute(f"""
+                SELECT
+                    release_rows.target_wodet_id,
+                    release_rows.item_no,
+                    source_hist.ITEMHISTID,
+                    source_hist.INVOICEID,
+                    source_hist.TXDATE,
+                    source_hist.TXTYPE,
+                    MAX(CAST(source_hist.DESCRIPTION AS VARCHAR(500))),
+                    SUM(COALESCE(fifo_detail.QUANTITY, 0)),
+                    COALESCE(NULLIF(source_hist.COST, 0), NULLIF(source_hist.NEWCOST, 0), 0)
+                FROM (
+                    SELECT md.WODETID AS target_wodet_id, md.ITEMNO AS item_no, md.ITEMHISTID AS outgoing_itemhist_id
+                    FROM MATRLSDET md
+                    WHERE md.WODETID IN ({_build_in_clause(chunk)})
+
+                    UNION ALL
+
+                    SELECT wm.WODETID AS target_wodet_id, md.ITEMNO AS item_no, md.ITEMHISTID AS outgoing_itemhist_id
+                    FROM MATRLSDET md
+                    JOIN WODETMAT wm ON wm.ID = md.WODETID
+                    WHERE wm.WODETID IN ({_build_in_clause(chunk)})
+                ) release_rows
+                JOIN ITEMHIST_DETAIL2 fifo_detail ON fifo_detail.ITEMHISTID = release_rows.outgoing_itemhist_id
+                JOIN ITEMHIST source_hist ON source_hist.ITEMHISTID = fifo_detail.FID
+                GROUP BY
+                    release_rows.target_wodet_id,
+                    release_rows.item_no,
+                    source_hist.ITEMHISTID,
+                    source_hist.INVOICEID,
+                    source_hist.TXDATE,
+                    source_hist.TXTYPE,
+                    source_hist.COST,
+                    source_hist.NEWCOST
+                ORDER BY source_hist.TXDATE, source_hist.ITEMHISTID
+            """, chunk + chunk)
+            fifo_rows = cur.fetchall()
+            for target_wodet_id, item_no, source_hist_id, invoice_id, tx_date, tx_type, description, source_qty, source_unit_cost in fifo_rows:
+                target_id = int(target_wodet_id or 0)
+                item_text = str(item_no or "").strip()
+                if not target_id or not item_text:
+                    continue
+                qty_value = float(source_qty or 0)
+                unit_cost_value = float(source_unit_cost or 0)
+                tx_type_text = str(tx_type or "").strip().upper()
+                doc_no = _siinas_resolve_doc_no(
+                    cur,
+                    itemhist_resolvers,
+                    invoice_resolvers,
+                    source_hist_id,
+                    invoice_id,
+                    description,
+                )
+                summary = fifo_cost_by_wodet_item.setdefault(
+                    (target_id, item_text),
+                    {"qty": 0.0, "value": 0.0, "transactions": []},
+                )
+                summary["qty"] += qty_value
+                summary["value"] += qty_value * unit_cost_value
+                summary["transactions"].append({
+                    "jenis_transaksi": "Pembelian" if tx_type_text == "P" else "Adjustment" if tx_type_text in {"A", "AD", "ADT", "ADJ", "AV"} else tx_type_text,
+                    "no_transaksi": doc_no,
+                    "tanggal": str(tx_date)[:10] if tx_date else "",
+                    "qty": qty_value,
+                    "harga_satuan": unit_cost_value,
+                })
+
+        for wodet_id, materials in materials_by_wodet.items():
+            for material in materials:
+                fifo_cost = fifo_cost_by_wodet_item.get((wodet_id, material.get("itemno")))
+                if not fifo_cost or not fifo_cost.get("qty"):
+                    material["referensi_harga"] = {}
+                    continue
+                transactions = fifo_cost.get("transactions") or []
+                material["value"] = float(fifo_cost.get("value") or 0)
+                material["referensi_harga"] = {
+                    "jenis_transaksi": transactions[0].get("jenis_transaksi", "") if len(transactions) == 1 else "Beberapa transaksi",
+                    "no_transaksi": transactions[0].get("no_transaksi", "") if len(transactions) == 1 else ", ".join(filter(None, (row.get("no_transaksi") for row in transactions))),
+                    "tanggal": transactions[0].get("tanggal", "") if len(transactions) == 1 else "",
+                    "harga_satuan": float(fifo_cost.get("value") or 0) / float(fifo_cost.get("qty") or 1),
+                    "transactions": transactions,
+                }
+
+        result_dates = sorted({
+            detail.get("tgl_hasil")
+            for record in grouped.values()
+            for detail in record.get("details") or []
+            if detail.get("tgl_hasil")
+        })
+        stock_summary_by_item_date = {}
+        purchase_origin_by_item_date = {}
+        person_columns = _get_table_columns(cur, "PERSONDATA") if _table_exists(cur, "PERSONDATA") else []
+        person_id_col = _match_column(person_columns, ("ID", "PERSONID", "VENDORID", "SUPPLIERID"))
+        purchase_country_expr = _siinas_person_country_expr(person_columns) if person_columns else "''"
+        can_resolve_purchase_origin = (
+            person_id_col
+            and _table_has_columns(cur, "APITMDET", ("ITEMNO", "APINVOICEID"))
+            and _table_has_columns(cur, "APINV", ("APINVOICEID", "VENDORID", "INVOICEDATE"))
+        )
+        for stock_date in result_dates:
+            if stock_date_to:
+                period_end = stock_date_to
+                period_start = stock_date_from or stock_date_to
+            else:
+                try:
+                    parsed_stock_date = datetime.strptime(stock_date, "%Y-%m-%d").date()
+                    period_start_date = parsed_stock_date.replace(day=1)
+                    if period_start_date.month == 12:
+                        next_month_date = period_start_date.replace(year=period_start_date.year + 1, month=1)
+                    else:
+                        next_month_date = period_start_date.replace(month=period_start_date.month + 1)
+                    period_end_date = next_month_date - timedelta(days=1)
+                    period_start = period_start_date.strftime("%Y-%m-%d")
+                    period_end = period_end_date.strftime("%Y-%m-%d")
+                except Exception:
+                    period_start = stock_date
+                    period_end = stock_date
+
+            for start in range(0, len(material_item_nos), 900):
+                item_chunk = material_item_nos[start:start + 900]
+                if not item_chunk:
+                    continue
+                cur.execute(f"""
+                    SELECT
+                        h.ITEMNO,
+                        SUM(CASE WHEN h.TXDATE < ? THEN COALESCE(h.QUANTITY, 0) ELSE 0 END),
+                        SUM(CASE WHEN h.TXDATE <= ? AND COALESCE(h.QUANTITY, 0) > 0 THEN COALESCE(h.QUANTITY, 0) ELSE 0 END),
+                        SUM(CASE WHEN h.TXDATE <= ? AND COALESCE(h.QUANTITY, 0) < 0 THEN -COALESCE(h.QUANTITY, 0) ELSE 0 END),
+                        SUM(CASE WHEN h.TXDATE <= ? THEN COALESCE(h.QUANTITY, 0) ELSE 0 END)
+                    FROM ITEMHIST h
+                    WHERE h.ITEMNO IN ({_build_in_clause(item_chunk)})
+                      AND h.TXDATE <= ?
+                    GROUP BY h.ITEMNO
+                """, [
+                    period_start,
+                    period_end,
+                    period_end,
+                    period_end,
+                    *item_chunk,
+                    period_end,
+                ])
+                for item_no, stock_awal, masuk, keluar, stock_akhir in cur.fetchall():
+                    item_text = str(item_no or "").strip()
+                    stock_summary_by_item_date[(item_text, stock_date)] = {
+                        "stok_awal": float(stock_awal or 0),
+                        "stok_masuk": float(masuk or 0),
+                        "stok_keluar": float(keluar or 0),
+                        "stok_akhir": float(stock_akhir or 0),
+                        "periode_stock_awal": period_start,
+                        "periode_stock_akhir": period_end,
+                    }
+
+                if can_resolve_purchase_origin:
+                    cur.execute(f"""
+                        SELECT
+                            det.ITEMNO,
+                            ai.APINVOICEID,
+                            {purchase_country_expr},
+                            SUM(COALESCE(det.QUANTITY, 0))
+                        FROM APITMDET det
+                        JOIN APINV ai ON ai.APINVOICEID = det.APINVOICEID
+                        LEFT JOIN PERSONDATA pd ON pd.{_identifier(person_id_col)} = ai.VENDORID
+                        WHERE det.ITEMNO IN ({_build_in_clause(item_chunk)})
+                          AND ai.INVOICEDATE <= ?
+                        GROUP BY det.ITEMNO, ai.APINVOICEID, {purchase_country_expr}
+                    """, item_chunk + [period_end])
+                    for purchase_item_no, _purchase_id, vendor_country, purchase_qty in cur.fetchall():
+                        item_text = str(purchase_item_no or "").strip()
+                        origin_summary = purchase_origin_by_item_date.setdefault(
+                            (item_text, stock_date),
+                            {"id": 0.0, "ln": 0.0},
+                        )
+                        normalized_country = _siinas_normalize_country(vendor_country)
+                        if normalized_country in {"indonesia", "id", "ina", "indonesian", "local", "lokal"}:
+                            origin_summary["id"] += float(purchase_qty or 0)
+                        else:
+                            origin_summary["ln"] += float(purchase_qty or 0)
+
+                if _table_has_columns(cur, "ITADJDET", ("ITEMHISTID", "ITEMADJID", "ITEMNO")) and _table_has_columns(cur, "ITEMADJ", ("ITEMADJID", "ADJDATE")):
+                    cur.execute(f"""
+                        SELECT
+                            det.ITEMNO,
+                            SUM(COALESCE(h.QUANTITY, 0))
+                        FROM ITADJDET det
+                        JOIN ITEMADJ adj ON adj.ITEMADJID = det.ITEMADJID
+                        JOIN ITEMHIST h ON h.ITEMHISTID = det.ITEMHISTID
+                        WHERE det.ITEMNO IN ({_build_in_clause(item_chunk)})
+                          AND adj.ADJDATE <= ?
+                          AND COALESCE(h.QUANTITY, 0) > 0
+                        GROUP BY det.ITEMNO
+                    """, item_chunk + [period_end])
+                    for adjustment_item_no, adjustment_qty in cur.fetchall():
+                        item_text = str(adjustment_item_no or "").strip()
+                        origin_summary = purchase_origin_by_item_date.setdefault(
+                            (item_text, stock_date),
+                            {"id": 0.0, "ln": 0.0},
+                        )
+                        origin_summary["id"] += float(adjustment_qty or 0)
 
         supplier_details = _siinas_resolve_supplier_details(
             cur,
@@ -2825,9 +3907,17 @@ def _get_siinas_monitoring_report_full(search="", offset=0, limit=50, date_from=
                 value = material["value"]
                 kg_qty = None
                 kg_unit = ""
-                validasi_ratio3 = validasi_satuan3_ratio_by_item.get(material["itemno"])
-                if validasi_ratio3:
-                    kg_qty = qty / validasi_ratio3
+                easy_unit3 = _siinas_normalize_unit(material.get("unit3"))
+                easy_ratio3 = float(material.get("ratio3") or 0)
+                validation_ratio3 = float(validasi_satuan3_ratio_by_item.get(material["itemno"]) or 0)
+                if easy_unit3 == _SIINAS_REQUIRED_SATUAN3_UNIT and easy_ratio3 > 0:
+                    conversion_ratio3 = easy_ratio3
+                    conversion_source = "Easy Accounting"
+                else:
+                    conversion_ratio3 = validation_ratio3
+                    conversion_source = "Data Validasi" if validation_ratio3 > 0 else ""
+                if conversion_ratio3:
+                    kg_qty = qty / conversion_ratio3
                     kg_unit = _SIINAS_REQUIRED_SATUAN3_UNIT
 
                 material_detail = {
@@ -2837,18 +3927,22 @@ def _get_siinas_monitoring_report_full(search="", offset=0, limit=50, date_from=
                     "stok_akhir": material["stok_akhir"],
                     "unit": material["unit"] or str(material["unit1"] or "").strip(),
                     "nilai": value,
+                    "referensi_harga": material.get("referensi_harga") or {},
                     "akun_persediaan": material["akun_persediaan"],
+                    "tipe_persediaan_barang": material["tipe_persediaan_barang"],
                     "nama_pemasok": supplier_detail.get("nama_pemasok", material.get("supplier_ref", "")),
                     "negara_pemasok": supplier_detail.get("negara_pemasok", ""),
                     "kode_negara": supplier_detail.get("kode_negara", ""),
                     "hs_code": material["hs_code"],
                     "kbli": material["kbli"],
+                    "produk_jadi": material["produk_jadi"],
                     "unit1": str(material["unit1"] or "").strip(),
                     "unit2": str(material["unit2"] or "").strip(),
                     "unit3": str(material["unit3"] or "").strip(),
                     "kg_qty": kg_qty,
                     "kg_unit": kg_unit,
-                    "rasio_3_validasi": validasi_ratio3 or 0,
+                    "rasio_3_validasi": conversion_ratio3 or 0,
+                    "sumber_rasio_3": conversion_source,
                 }
                 if kg_qty is not None:
                     material_groups["material_kg"].append(material_detail)
@@ -2869,8 +3963,45 @@ def _get_siinas_monitoring_report_full(search="", offset=0, limit=50, date_from=
         for record in grouped.values():
             for detail in record.get("details") or []:
                 groups = material_groups_by_wodet.get(detail.get("wodet_id"), {})
-                detail["material_non_kg"] = groups.get("material_non_kg", [])
-                detail["material_kg"] = groups.get("material_kg", [])
+                stock_date = detail.get("tgl_hasil") or ""
+
+                def with_stock_period(material_rows):
+                    rows = []
+                    for material_detail in material_rows:
+                        material_row = dict(material_detail)
+                        stock_summary = stock_summary_by_item_date.get(
+                            (material_row.get("no_barang"), stock_date),
+                            {},
+                        )
+                        purchase_origin = purchase_origin_by_item_date.get(
+                            (material_row.get("no_barang"), stock_date),
+                            {},
+                        )
+                        purchase_id = float(purchase_origin.get("id") or 0)
+                        purchase_ln = float(purchase_origin.get("ln") or 0)
+                        purchase_total = purchase_id + purchase_ln
+                        material_row["stok_awal"] = float(stock_summary.get("stok_awal") or 0)
+                        material_row["stok_masuk"] = float(stock_summary.get("stok_masuk") or 0)
+                        material_row["stok_keluar"] = float(stock_summary.get("stok_keluar") or 0)
+                        material_row["stok_akhir"] = float(stock_summary.get("stok_akhir") or 0)
+                        material_row["tgl_stock_akhir"] = stock_summary.get("periode_stock_akhir") or stock_date
+                        material_row["kuantitas_masuk_id"] = purchase_id
+                        material_row["persentase_id"] = (purchase_id / purchase_total * 100) if purchase_total else 0
+                        material_row["kuantitas_masuk_ln"] = purchase_ln
+                        material_row["persentase_ln"] = (purchase_ln / purchase_total * 100) if purchase_total else 0
+                        ratio = float(material_row.get("rasio_3_validasi") or 0)
+                        unit = str(material_row.get("unit") or "").strip().upper()
+                        if ratio:
+                            material_row["stok_akhir_kgm"] = material_row["stok_akhir"] / ratio
+                        elif unit in {"KG", "KGS", "KGM"}:
+                            material_row["stok_akhir_kgm"] = material_row["stok_akhir"]
+                        else:
+                            material_row["stok_akhir_kgm"] = None
+                        rows.append(material_row)
+                    return rows
+
+                detail["material_non_kg"] = with_stock_period(groups.get("material_non_kg", []))
+                detail["material_kg"] = with_stock_period(groups.get("material_kg", []))
 
         date_rows = sorted(grouped.values(), key=lambda row: (row["kode_kategori"], row["tanggal_gp"]), reverse=True)
         for row in date_rows:
@@ -2925,6 +4056,8 @@ def _get_siinas_monitoring_report(search="", offset=0, limit=50, date_from="", d
     try:
         item_columns = _get_table_columns(cur, "ITEM")
         code_product_col = _siinas_pick_column(item_columns, ("CODEPRODUCT", "ITEMRESERVED1", "RESERVED1"))
+        unit3_col = _siinas_pick_column(item_columns, ("UNIT3", "ITEMUNIT3", "THIRDUNIT"))
+        ratio3_col = _siinas_pick_column(item_columns, ("RATIO3", "UNITRATIO3", "RATIOUNIT3"))
 
         def item_expr(column, alias="i", fallback="NULL"):
             return f"{alias}.{_identifier(column)}" if column else fallback
@@ -3006,12 +4139,15 @@ def _get_siinas_monitoring_report(search="", offset=0, limit=50, date_from="", d
                             THEN COALESCE(w.QUANTITY, 0) * COALESCE(w.COSTUNIT, 0)
                             ELSE COALESCE(w.COST, 0)
                         END
-                    )
+                    ),
+                    MAX(CAST({item_expr(unit3_col, alias="mi", fallback="''")} AS VARCHAR(50))),
+                    MAX({item_expr(ratio3_col, alias="mi", fallback="0")})
                 FROM WODETMAT w
+                LEFT JOIN ITEM mi ON mi.ITEMNO = w.ITEMNO
                 WHERE w.WODETID IN ({_build_in_clause(wodet_chunk)})
                 GROUP BY w.WODETID, w.ITEMNO
             """, wodet_chunk)
-            for material_wodet_id, item_no, material_qty, material_value in cur.fetchall():
+            for material_wodet_id, item_no, material_qty, material_value, easy_unit3, easy_ratio3 in cur.fetchall():
                 totals = material_totals_by_wodet.setdefault(
                     int(material_wodet_id or 0),
                     {"kts_standar_kgm": 0.0, "nilai_produksi_kgm": 0.0, "nilai_produksi_asli": 0.0},
@@ -3019,7 +4155,10 @@ def _get_siinas_monitoring_report(search="", offset=0, limit=50, date_from="", d
                 value = float(material_value or 0)
                 totals["nilai_produksi_asli"] += value
                 item_text = str(item_no or "").strip()
-                ratio3 = validasi_satuan3_ratio_by_item.get(item_text)
+                if _siinas_normalize_unit(easy_unit3) == _SIINAS_REQUIRED_SATUAN3_UNIT and float(easy_ratio3 or 0) > 0:
+                    ratio3 = float(easy_ratio3 or 0)
+                else:
+                    ratio3 = float(validasi_satuan3_ratio_by_item.get(item_text) or 0)
                 if ratio3:
                     totals["kts_standar_kgm"] += float(material_qty or 0) / ratio3
                     totals["nilai_produksi_kgm"] += value
@@ -3072,7 +4211,11 @@ def _get_siinas_monitoring_report(search="", offset=0, limit=50, date_from="", d
         con.close()
 
 
-def _get_siinas_monitoring_details(kode_kategori="", tanggal_gp=""):
+def _get_siinas_monitoring_details(kode_kategori="", tanggal_gp="", stock_date_from="", stock_date_to=""):
+    if not stock_date_to:
+        today = datetime.now().date()
+        stock_date_to = today.strftime("%Y-%m-%d")
+        stock_date_from = stock_date_from or today.replace(day=1).strftime("%Y-%m-%d")
     exact_code = "__EMPTY__" if not str(kode_kategori or "").strip() else str(kode_kategori or "").strip()
     result = _get_siinas_monitoring_report_full(
         offset=0,
@@ -3080,12 +4223,212 @@ def _get_siinas_monitoring_details(kode_kategori="", tanggal_gp=""):
         date_from=tanggal_gp,
         date_to=tanggal_gp,
         exact_code=exact_code,
+        stock_date_from=stock_date_from,
+        stock_date_to=stock_date_to,
     )
     for category in result.get("data") or []:
         for date_row in category.get("dates") or []:
             if date_row.get("tanggal_gp") == tanggal_gp:
                 return {"data": date_row.get("details") or []}
     return {"data": []}
+
+
+def _get_siinas_monitoring_export(kode_kategori=None, date_from="", date_to=""):
+    selected_codes = [
+        "__EMPTY__" if not str(code or "").strip() else str(code).strip()
+        for code in (kode_kategori or [])
+    ]
+    if not selected_codes:
+        return {"data": []}
+
+    result = _get_siinas_monitoring_report_full(
+        offset=0,
+        limit=100000,
+        date_from=date_from,
+        date_to=date_to,
+        exact_codes=selected_codes,
+        stock_date_from=date_from,
+        stock_date_to=date_to,
+    )
+    details = []
+    for category in result.get("data") or []:
+        for date_row in category.get("dates") or []:
+            details.extend(date_row.get("details") or [])
+    return {"data": details}
+
+
+def _get_siinas_stock_in_transactions(item_no="", date_to=""):
+    item_text = str(item_no or "").strip()
+    if not item_text:
+        return {"data": []}
+    cutoff_date = date_to or datetime.now().strftime("%Y-%m-%d")
+    con = fdb.connect(**DB_CONFIG)
+    cur = con.cursor()
+    try:
+        itemhist_resolvers, invoice_resolvers = _siinas_build_doc_resolvers(cur)
+        cur.execute("""
+            SELECT
+                h.ITEMHISTID,
+                h.INVOICEID,
+                h.TXDATE,
+                h.TXTYPE,
+                h.DESCRIPTION,
+                h.QUANTITY
+            FROM ITEMHIST h
+            WHERE h.ITEMNO = ?
+              AND h.TXDATE <= ?
+              AND COALESCE(h.QUANTITY, 0) > 0
+            ORDER BY h.TXDATE, h.ITEMHISTID
+        """, [item_text, cutoff_date])
+        rows = cur.fetchall()
+        data = []
+        for itemhist_id, invoice_id, tx_date, tx_type, description, quantity in rows:
+            tx_type_text = str(tx_type or "").strip().upper()
+            data.append({
+                "itemhist_id": int(itemhist_id or 0),
+                "tanggal": str(tx_date)[:10] if tx_date else "",
+                "jenis_transaksi": "Pembelian" if tx_type_text == "P" else "Adjustment" if tx_type_text in {"A", "AD", "ADT", "ADJ", "AV"} else tx_type_text,
+                "no_transaksi": _siinas_resolve_doc_no(
+                    cur,
+                    itemhist_resolvers,
+                    invoice_resolvers,
+                    itemhist_id,
+                    invoice_id,
+                    description,
+                ),
+                "qty": float(quantity or 0),
+            })
+        return {"data": data, "date_to": cutoff_date}
+    finally:
+        con.close()
+
+
+def _get_siinas_stock_out_transactions(item_no="", date_to=""):
+    item_text = str(item_no or "").strip()
+    if not item_text:
+        return {"data": []}
+    cutoff_date = date_to or datetime.now().strftime("%Y-%m-%d")
+    con = fdb.connect(**DB_CONFIG)
+    cur = con.cursor()
+    try:
+        itemhist_resolvers, invoice_resolvers = _siinas_build_doc_resolvers(cur)
+        cur.execute("""
+            SELECT
+                h.ITEMHISTID,
+                h.INVOICEID,
+                h.TXDATE,
+                h.TXTYPE,
+                h.DESCRIPTION,
+                h.QUANTITY
+            FROM ITEMHIST h
+            WHERE h.ITEMNO = ?
+              AND h.TXDATE <= ?
+              AND COALESCE(h.QUANTITY, 0) < 0
+            ORDER BY h.TXDATE, h.ITEMHISTID
+        """, [item_text, cutoff_date])
+        rows = cur.fetchall()
+        data = []
+        for itemhist_id, invoice_id, tx_date, tx_type, description, quantity in rows:
+            tx_type_text = str(tx_type or "").strip().upper()
+            doc_no = _siinas_resolve_doc_no(
+                cur,
+                itemhist_resolvers,
+                invoice_resolvers,
+                itemhist_id,
+                invoice_id,
+                description,
+            )
+            doc_upper = doc_no.upper()
+            if "-SPM-" in doc_upper:
+                transaction_type = "SPM"
+            elif "-ADJ-" in doc_upper:
+                transaction_type = "Adjustment"
+            else:
+                transaction_type = "Adjustment" if tx_type_text in {"A", "AD", "ADT", "ADJ", "AV"} else tx_type_text
+            data.append({
+                "itemhist_id": int(itemhist_id or 0),
+                "tanggal": str(tx_date)[:10] if tx_date else "",
+                "jenis_transaksi": transaction_type,
+                "no_transaksi": doc_no,
+                "qty": abs(float(quantity or 0)),
+            })
+        return {"data": data, "date_to": cutoff_date}
+    finally:
+        con.close()
+
+
+def _get_siinas_purchase_transactions(item_no="", date_to="", origin=""):
+    item_text = str(item_no or "").strip()
+    origin_text = str(origin or "").strip().upper()
+    if not item_text or origin_text not in {"ID", "LN"}:
+        return {"data": []}
+    cutoff_date = date_to or datetime.now().strftime("%Y-%m-%d")
+    con = fdb.connect(**DB_CONFIG)
+    cur = con.cursor()
+    try:
+        cur.execute("""
+            SELECT
+                ai.APINVOICEID,
+                ai.INVOICENO,
+                ai.INVOICEDATE,
+                pd.NAME,
+                pd.COUNTRY,
+                SUM(COALESCE(det.QUANTITY, 0))
+            FROM APITMDET det
+            JOIN APINV ai ON ai.APINVOICEID = det.APINVOICEID
+            LEFT JOIN PERSONDATA pd ON pd.ID = ai.VENDORID
+            WHERE det.ITEMNO = ?
+              AND ai.INVOICEDATE <= ?
+            GROUP BY ai.APINVOICEID, ai.INVOICENO, ai.INVOICEDATE, pd.NAME, pd.COUNTRY
+            ORDER BY ai.INVOICEDATE, ai.APINVOICEID
+        """, [item_text, cutoff_date])
+        data = []
+        for invoice_id, invoice_no, invoice_date, vendor_name, vendor_country, quantity in cur.fetchall():
+            normalized_country = _siinas_normalize_country(vendor_country)
+            transaction_origin = "ID" if normalized_country in {"indonesia", "id", "ina", "indonesian", "local", "lokal"} else "LN"
+            if transaction_origin != origin_text:
+                continue
+            data.append({
+                "transaction_key": f"AP-{int(invoice_id or 0)}",
+                "invoice_id": int(invoice_id or 0),
+                "jenis_transaksi": "Pembelian",
+                "no_transaksi": str(invoice_no or "").strip(),
+                "tanggal": str(invoice_date)[:10] if invoice_date else "",
+                "vendor": str(vendor_name or "").strip(),
+                "negara": str(vendor_country or "").strip(),
+                "qty": float(quantity or 0),
+            })
+        if origin_text == "ID":
+            cur.execute("""
+                SELECT
+                    adj.ITEMADJID,
+                    adj.ADJNO,
+                    adj.ADJDATE,
+                    SUM(COALESCE(h.QUANTITY, 0))
+                FROM ITADJDET det
+                JOIN ITEMADJ adj ON adj.ITEMADJID = det.ITEMADJID
+                JOIN ITEMHIST h ON h.ITEMHISTID = det.ITEMHISTID
+                WHERE det.ITEMNO = ?
+                  AND adj.ADJDATE <= ?
+                  AND COALESCE(h.QUANTITY, 0) > 0
+                GROUP BY adj.ITEMADJID, adj.ADJNO, adj.ADJDATE
+                ORDER BY adj.ADJDATE, adj.ITEMADJID
+            """, [item_text, cutoff_date])
+            for adjustment_id, adjustment_no, adjustment_date, adjustment_qty in cur.fetchall():
+                data.append({
+                    "transaction_key": f"ADJ-{int(adjustment_id or 0)}",
+                    "invoice_id": int(adjustment_id or 0),
+                    "jenis_transaksi": "Adjustment",
+                    "no_transaksi": str(adjustment_no or "").strip(),
+                    "tanggal": str(adjustment_date)[:10] if adjustment_date else "",
+                    "vendor": "-",
+                    "negara": "Indonesia",
+                    "qty": float(adjustment_qty or 0),
+                })
+            data.sort(key=lambda row: (row.get("tanggal") or "", row.get("transaction_key") or ""))
+        return {"data": data, "date_to": cutoff_date, "origin": origin_text}
+    finally:
+        con.close()
 
 
 @app.route("/api/siinas/monitoring-report")
@@ -3115,9 +4458,74 @@ def api_siinas_monitoring_details():
         return jsonify(_get_siinas_monitoring_details(
             kode_kategori=request.args.get("kode_kategori", ""),
             tanggal_gp=request.args.get("tanggal_gp", ""),
+            stock_date_from=request.args.get("date_from", ""),
+            stock_date_to=request.args.get("date_to", ""),
         ))
     except Exception as e:
         print(f"Error api_siinas_monitoring_details: {e}")
+        return jsonify({"data": [], "error": str(e)}), 500
+
+
+@app.route("/api/siinas/monitoring-report/export", methods=["POST"])
+@jwt_required()
+def api_siinas_monitoring_export():
+    if not check_permission("siinas"):
+        return jsonify({"message": "Akses ditolak"}), 403
+    try:
+        payload = request.get_json(silent=True) or {}
+        return jsonify(_get_siinas_monitoring_export(
+            kode_kategori=payload.get("kode_kategori") or [],
+            date_from=payload.get("date_from", ""),
+            date_to=payload.get("date_to", ""),
+        ))
+    except Exception as e:
+        print(f"Error api_siinas_monitoring_export: {e}")
+        return jsonify({"data": [], "error": str(e)}), 500
+
+
+@app.route("/api/siinas/monitoring-report/stock-in-transactions")
+@jwt_required()
+def api_siinas_stock_in_transactions():
+    if not check_permission("siinas"):
+        return jsonify({"message": "Akses ditolak"}), 403
+    try:
+        return jsonify(_get_siinas_stock_in_transactions(
+            item_no=request.args.get("item_no", ""),
+            date_to=request.args.get("date_to", ""),
+        ))
+    except Exception as e:
+        print(f"Error api_siinas_stock_in_transactions: {e}")
+        return jsonify({"data": [], "error": str(e)}), 500
+
+
+@app.route("/api/siinas/monitoring-report/stock-out-transactions")
+@jwt_required()
+def api_siinas_stock_out_transactions():
+    if not check_permission("siinas"):
+        return jsonify({"message": "Akses ditolak"}), 403
+    try:
+        return jsonify(_get_siinas_stock_out_transactions(
+            item_no=request.args.get("item_no", ""),
+            date_to=request.args.get("date_to", ""),
+        ))
+    except Exception as e:
+        print(f"Error api_siinas_stock_out_transactions: {e}")
+        return jsonify({"data": [], "error": str(e)}), 500
+
+
+@app.route("/api/siinas/monitoring-report/purchase-transactions")
+@jwt_required()
+def api_siinas_purchase_transactions():
+    if not check_permission("siinas"):
+        return jsonify({"message": "Akses ditolak"}), 403
+    try:
+        return jsonify(_get_siinas_purchase_transactions(
+            item_no=request.args.get("item_no", ""),
+            date_to=request.args.get("date_to", ""),
+            origin=request.args.get("origin", ""),
+        ))
+    except Exception as e:
+        print(f"Error api_siinas_purchase_transactions: {e}")
         return jsonify({"data": [], "error": str(e)}), 500
 
 @app.route("/api/dashboard-summary")
@@ -3143,31 +4551,19 @@ def api_dashboard_summary():
 
     date_from = request.args.get("date_from") or datetime.now().replace(day=1).strftime("%Y-%m-%d")
     date_to = request.args.get("date_to") or datetime.now().strftime("%Y-%m-%d")
+    include_accounting = str(request.args.get("include_accounting", "0")).lower() in {"1", "true", "yes"}
     period_filter = "{field} >= ? AND {field} <= ?"
     sales_amount_expr = """
         COALESCE(det.QUANTITY, 0)
         * COALESCE(det.UNITPRICE, 0)
-        * (1 - COALESCE(CAST(det.DISCPC AS DOUBLE PRECISION), 0) / 100)
+        * (1 - COALESCE(CAST(NULLIF(TRIM(det.DISCPC), '') AS DOUBLE PRECISION), 0) / 100)
     """
 
     try:
         con = fdb.connect(**DB_CONFIG)
         cur = con.cursor()
 
-        total_item, stok_kosong = row_values(cur, """
-            SELECT
-                COUNT(*),
-                SUM(CASE WHEN COALESCE(s.qty, 0) <= 0 THEN 1 ELSE 0 END)
-            FROM ITEM i
-            LEFT JOIN (
-                SELECT ITEMNO, SUM(QUANTITY) AS qty
-                FROM ITEMHIST
-                GROUP BY ITEMNO
-            ) s ON s.ITEMNO = i.ITEMNO
-            WHERE COALESCE(i.ITEMTYPE, 0) = 0
-              AND COALESCE(i.SUSPENDED, 0) = 0
-        """, [], [0, 0])
-        stock_summary = get_stock_summary()
+        stock_summary = get_dashboard_stock_summary(cur)
 
         po_period = one(cur, f"""
             SELECT COUNT(*)
@@ -3403,6 +4799,90 @@ def api_dashboard_summary():
             for row in cur.fetchall()
         ]
 
+        def add_months(value, months):
+            year = value.year + ((value.month - 1 + months) // 12)
+            month = ((value.month - 1 + months) % 12) + 1
+            day = min(value.day, 28)
+            return value.replace(year=year, month=month, day=day)
+
+        monthly_to = current_to
+        monthly_from = add_months(monthly_to.replace(day=1), -11)
+        month_labels = []
+        cursor_month = monthly_from
+        while cursor_month <= monthly_to.replace(day=1):
+            month_labels.append(cursor_month)
+            cursor_month = add_months(cursor_month, 1)
+
+        cur.execute(f"""
+            SELECT
+                EXTRACT(YEAR FROM so.SODATE),
+                EXTRACT(MONTH FROM so.SODATE),
+                COUNT(DISTINCT so.SOID),
+                SUM(COALESCE(det.QUANTITY, 0)),
+                SUM({sales_amount_expr})
+            FROM SO so
+            LEFT JOIN SODET det ON det.SOID = so.SOID
+            WHERE det.ITEMNO IS NOT NULL
+              AND {period_filter.format(field="so.SODATE")}
+            GROUP BY EXTRACT(YEAR FROM so.SODATE), EXTRACT(MONTH FROM so.SODATE)
+            ORDER BY 1, 2
+        """, [monthly_from.isoformat(), monthly_to.isoformat()])
+        monthly_sales_map = {
+            (int(row[0] or 0), int(row[1] or 0)): {
+                "so_count": int(row[2] or 0),
+                "qty": float(row[3] or 0),
+                "amount": float(row[4] or 0),
+            }
+            for row in cur.fetchall()
+        }
+        monthly_sales_amount = []
+        for month_date in month_labels:
+            values = monthly_sales_map.get((month_date.year, month_date.month), {})
+            monthly_sales_amount.append({
+                "month": month_date.strftime("%Y-%m"),
+                "label": month_date.strftime("%b %Y"),
+                "so_count": int(values.get("so_count") or 0),
+                "qty": float(values.get("qty") or 0),
+                "amount": float(values.get("amount") or 0),
+            })
+
+        product_monthly_from = add_months(monthly_to.replace(day=1), -59)
+        code_product_expr = _stock_code_product_expr(cur)
+        code_product_group_expr = f"COALESCE(TRIM({code_product_expr}), '')"
+
+        cur.execute(f"""
+            SELECT FIRST 12000
+                EXTRACT(YEAR FROM so.SODATE),
+                EXTRACT(MONTH FROM so.SODATE),
+                {code_product_group_expr},
+                COUNT(DISTINCT det.ITEMNO),
+                COUNT(DISTINCT so.SOID),
+                SUM(COALESCE(det.QUANTITY, 0)),
+                SUM({sales_amount_expr})
+            FROM SO so
+            LEFT JOIN SODET det ON det.SOID = so.SOID
+            LEFT JOIN ITEM i ON i.ITEMNO = det.ITEMNO
+            WHERE det.ITEMNO IS NOT NULL
+              AND {period_filter.format(field="so.SODATE")}
+            GROUP BY EXTRACT(YEAR FROM so.SODATE), EXTRACT(MONTH FROM so.SODATE), {code_product_group_expr}
+            ORDER BY 1 DESC, 2 DESC, 7 DESC
+        """, [product_monthly_from.isoformat(), monthly_to.isoformat()])
+        monthly_products_by_amount = [
+            {
+                "month": f"{int(row[0] or 0):04d}-{int(row[1] or 0):02d}",
+                "label": datetime(int(row[0] or 1900), int(row[1] or 1), 1).strftime("%b %Y"),
+                "code_product": str(row[2] or "").strip(),
+                "code_product_key": str(row[2] or "").strip() or "__EMPTY__",
+                "itemno": str(row[2] or "").strip() or "__EMPTY__",
+                "description": str(row[2] or "").strip() or "(Code Product kosong)",
+                "item_count": int(row[3] or 0),
+                "so_count": int(row[4] or 0),
+                "qty": float(row[5] or 0),
+                "amount": float(row[6] or 0),
+            }
+            for row in cur.fetchall()
+        ]
+
         cur.execute(f"""
             SELECT FIRST 5
                 pd.NAME,
@@ -3558,17 +5038,21 @@ def api_dashboard_summary():
             ) x
         """, [date_from, date_to], [0, 0, 0, 0])
 
-        try:
-            hpp_rows = _build_hpp_rows(cur, date_from, date_to, "")
-        except Exception as hpp_error:
-            print(f"Error dashboard hpp summary: {hpp_error}")
-            hpp_rows = []
+        hpp_rows = []
+        aset_rows = []
+        aset_total = 0
+        if include_accounting:
+            try:
+                hpp_rows = _build_hpp_rows(cur, date_from, date_to, "")
+            except Exception as hpp_error:
+                print(f"Error dashboard hpp summary: {hpp_error}")
+                hpp_rows = []
 
-        try:
-            aset_rows, aset_total, _ = _build_aset_rows(cur, "", date_from, date_to, 0, 99999)
-        except Exception as aset_error:
-            print(f"Error dashboard aset summary: {aset_error}")
-            aset_rows, aset_total = [], 0
+            try:
+                aset_rows, aset_total, _ = _build_aset_rows(cur, "", date_from, date_to, 0, 99999)
+            except Exception as aset_error:
+                print(f"Error dashboard aset summary: {aset_error}")
+                aset_rows, aset_total = [], 0
 
         con.close()
 
@@ -3596,14 +5080,15 @@ def api_dashboard_summary():
                 "date_to": date_to,
             },
             "stock": {
-                "total": int(stock_summary.get("total_items") or total_item or 0),
-                "kosong": int(stock_summary.get("below_minimum_items") or 0),
-                "ada": int((stock_summary.get("total_items") or total_item or 0) - (stock_summary.get("below_minimum_items") or 0)),
+                "total": int(stock_summary.get("total") or 0),
+                "kosong": int(stock_summary.get("kosong") or 0),
+                "ada": int(stock_summary.get("ada") or 0),
                 "total_items": int(stock_summary.get("total_items") or 0),
                 "category_count": int(stock_summary.get("category_count") or 0),
                 "categories": stock_summary.get("categories") or [],
                 "standardized_items": int(stock_summary.get("standardized_items") or 0),
                 "below_minimum_items": int(stock_summary.get("below_minimum_items") or 0),
+                "minimum_configured_items": int(stock_summary.get("minimum_configured_items") or 0),
             },
             "purchasing": {
                 "po_period": int(po_period or 0),
@@ -3641,6 +5126,8 @@ def api_dashboard_summary():
                 "top_customers_by_amount": top_customers,
                 "top_customers_by_count": top_customers_by_count,
                 "top_salesmen": top_salesmen,
+                "monthly_sales_amount": monthly_sales_amount,
+                "monthly_products_by_amount": monthly_products_by_amount,
                 "outstanding_receivables": outstanding_receivables,
                 "receivables_by_customer": receivables_by_customer,
                 "invoice_period": int(invoice_period or 0),
@@ -3789,53 +5276,69 @@ def api_riwayat_export():
 
 # ─── BARANG BARU ─────────────────────────────────────────────────────────────
 
-max_itemid_at_start = 0
+max_itemid_at_start = None
+new_items_lock = threading.Lock()
 
 def init_baseline():
     global max_itemid_at_start
     try:
+        max_logged = get_max_logged_itemid()
+        if max_logged > 0:
+            max_itemid_at_start = max_logged
+            print(f"Baseline ITEMID dari log: {max_itemid_at_start}")
+            return
+
         con = fdb.connect(**DB_CONFIG)
         cur = con.cursor()
         cur.execute("SELECT MAX(ITEMID) FROM ITEM")
         row = cur.fetchone()
-        max_easy = int(row[0] or 0)
         con.close()
-        max_logged = get_max_logged_itemid()
-        max_itemid_at_start = max(max_easy, max_logged)
-        print(f"Baseline ITEMID: {max_itemid_at_start}")
+        max_itemid_at_start = int(row[0] or 0)
+        print(f"Baseline ITEMID awal: {max_itemid_at_start}")
     except Exception as e:
         print(f"Error init_baseline: {e}")
 
 def check_new_items():
     global max_itemid_at_start
-    try:
-        con = fdb.connect(**DB_CONFIG)
-        cur = con.cursor()
-        cur.execute("""
-            SELECT ITEMID, ITEMNO, ITEMDESCRIPTION, ITEMDESCRIPTION2, UNIT1, TIPEPERSEDIAAN
-            FROM ITEM WHERE ITEMID > ? ORDER BY ITEMID ASC
-        """, (max_itemid_at_start,))
-        rows = cur.fetchall()
-        con.close()
-        for row in rows:
-            item_id = int(row[0] or 0)
-            item = {
-                "itemid": item_id, "itemno": str(row[1] or "").strip(),
-                "description": str(row[2] or "").strip(), "description2": str(row[3] or "").strip(),
-                "unit": str(row[4] or "").strip(), "type": str(row[5] or "").strip(),
-                "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            }
-            save_barang_baru(item)
-            max_itemid_at_start = max(max_itemid_at_start, item_id)
-            print(f"Barang baru: {row[1]}")
-    except Exception as e:
-        print(f"Error check_new_items: {e}")
+    if max_itemid_at_start is None:
+        init_baseline()
+    if max_itemid_at_start is None:
+        return
+
+    with new_items_lock:
+        if max_itemid_at_start is None:
+            return
+        current_baseline = max_itemid_at_start
+
+        try:
+            con = fdb.connect(**DB_CONFIG)
+            cur = con.cursor()
+            cur.execute("""
+                SELECT ITEMID, ITEMNO, ITEMDESCRIPTION, ITEMDESCRIPTION2, UNIT1, TIPEPERSEDIAAN
+                FROM ITEM WHERE ITEMID > ? ORDER BY ITEMID ASC
+            """, (current_baseline,))
+            rows = cur.fetchall()
+            con.close()
+            for row in rows:
+                item_id = int(row[0] or 0)
+                item = {
+                    "itemid": item_id, "itemno": str(row[1] or "").strip(),
+                    "description": str(row[2] or "").strip(), "description2": str(row[3] or "").strip(),
+                    "unit": str(row[4] or "").strip(), "type": str(row[5] or "").strip(),
+                    "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                }
+                save_barang_baru(item)
+                max_itemid_at_start = max(max_itemid_at_start, item_id)
+                print(f"Barang baru: {row[1]}")
+        except Exception as e:
+            print(f"Error check_new_items: {e}")
 
 @app.route("/api/barang-baru")
 @jwt_required()
 def api_barang_baru():
     if not check_permission("barang-baru"):
         return jsonify({"message": "Akses ditolak"}), 403
+    check_new_items()
     date_from = request.args.get("date_from", "")
     date_to   = request.args.get("date_to", "")
     data = get_barang_baru_log(
@@ -3851,6 +5354,236 @@ def api_barang_baru():
 # Tambahkan endpoint ini ke server.py sebelum background_sync()
 # Tabel: REQUISITION + REQUISITIONDET + ITEM
 # Status: Menunggu / Sudah Dipesan / Sudah Diterima
+
+def _pemasok_currency_join_and_expr(cur):
+    if not _table_exists(cur, "CURRENCY"):
+        return "", "CAST(pd.CURRENCYID AS VARCHAR(30))"
+    columns = set(_get_table_columns(cur, "CURRENCY"))
+    id_col = _match_column(columns, ("CURRENCYID", "ID"))
+    code_col = _match_column(columns, ("CURRENCYNAME", "CURRENCYNO", "NAME", "CODE", "SYMBOL"))
+    if not id_col or not code_col:
+        return "", "CAST(pd.CURRENCYID AS VARCHAR(30))"
+    return f"LEFT JOIN CURRENCY cy ON cy.{_identifier(id_col)} = pd.CURRENCYID", f"cy.{_identifier(code_col)}"
+
+
+def _pemasok_where(search="", status=""):
+    conditions = ["pd.PERSONTYPE = 1"]
+    params = []
+    if search:
+        conditions.append("""(
+            LOWER(pd.PERSONNO) CONTAINING LOWER(?)
+            OR LOWER(pd.NAME) CONTAINING LOWER(?)
+            OR LOWER(pd.ADDRESSLINE1) CONTAINING LOWER(?)
+            OR LOWER(pd.ADDRESSLINE2) CONTAINING LOWER(?)
+            OR LOWER(pd.CITY) CONTAINING LOWER(?)
+            OR LOWER(pd.STATEPROV) CONTAINING LOWER(?)
+            OR LOWER(pd.COUNTRY) CONTAINING LOWER(?)
+            OR LOWER(pd.CONTACT) CONTAINING LOWER(?)
+            OR LOWER(pd.PHONE) CONTAINING LOWER(?)
+            OR LOWER(pd.FAX) CONTAINING LOWER(?)
+            OR LOWER(pd.EMAIL) CONTAINING LOWER(?)
+            OR LOWER(pd.WEBPAGE) CONTAINING LOWER(?)
+        )""")
+        params += [search] * 12
+    if status == "aktif":
+        conditions.append("COALESCE(pd.SUSPENDED, 0) = 0")
+    elif status == "nonaktif":
+        conditions.append("COALESCE(pd.SUSPENDED, 0) <> 0")
+    return " AND ".join(conditions), params
+
+
+def _pemasok_rows(rows):
+    return [{
+        "id": int(row[0] or 0),
+        "no_pemasok": str(row[1] or "").strip(),
+        "nama_pemasok": str(row[2] or "").strip(),
+        "alamat_1": str(row[3] or "").strip(),
+        "alamat_2": str(row[4] or "").strip(),
+        "kota": str(row[5] or "").strip(),
+        "provinsi": str(row[6] or "").strip(),
+        "kode_pos": str(row[7] or "").strip(),
+        "negara": str(row[8] or "").strip(),
+        "kontak": str(row[9] or "").strip(),
+        "telp": str(row[10] or "").strip(),
+        "fax": str(row[11] or "").strip(),
+        "email": str(row[12] or "").strip(),
+        "website": str(row[13] or "").strip(),
+        "saldo": float(row[14] or 0),
+        "credit_limit": float(row[15] or 0),
+        "mata_uang": str(row[16] or "").strip() or "IDR",
+        "catatan": str(row[17] or "").strip(),
+        "dihentikan": "Ya" if int(row[18] or 0) else "Tidak",
+    } for row in rows]
+
+
+def _fetch_pemasok(search="", status="", offset=0, limit=50, include_total=False):
+    con = fdb.connect(**DB_CONFIG)
+    cur = con.cursor()
+    currency_join, currency_expr = _pemasok_currency_join_and_expr(cur)
+    where_sql, params = _pemasok_where(search, status)
+
+    total = None
+    summary = None
+    if include_total:
+        cur.execute(f"SELECT COUNT(*) FROM PERSONDATA pd WHERE {where_sql}", params)
+        total = int(cur.fetchone()[0] or 0)
+        cur.execute("""
+            SELECT
+                COUNT(*),
+                SUM(CASE WHEN COALESCE(SUSPENDED, 0) = 0 THEN 1 ELSE 0 END),
+                SUM(CASE WHEN COALESCE(SUSPENDED, 0) <> 0 THEN 1 ELSE 0 END),
+                SUM(COALESCE(BALANCE, 0))
+            FROM PERSONDATA
+            WHERE PERSONTYPE = 1
+        """)
+        row = cur.fetchone() or [0, 0, 0, 0]
+        summary = {
+            "total": int(row[0] or 0),
+            "aktif": int(row[1] or 0),
+            "nonaktif": int(row[2] or 0),
+            "saldo": float(row[3] or 0),
+        }
+
+    paging_sql = "FIRST ? SKIP ?" if limit else ""
+    paging_params = [limit, offset] if limit else []
+    cur.execute(f"""
+        SELECT {paging_sql}
+            pd.ID,
+            pd.PERSONNO,
+            pd.NAME,
+            pd.ADDRESSLINE1,
+            pd.ADDRESSLINE2,
+            pd.CITY,
+            pd.STATEPROV,
+            pd.ZIPCODE,
+            pd.COUNTRY,
+            pd.CONTACT,
+            pd.PHONE,
+            pd.FAX,
+            pd.EMAIL,
+            pd.WEBPAGE,
+            pd.BALANCE,
+            pd.CREDITLIMIT,
+            {currency_expr},
+            pd.NOTES,
+            pd.SUSPENDED
+        FROM PERSONDATA pd
+        {currency_join}
+        WHERE {where_sql}
+        ORDER BY pd.PERSONNO
+    """, paging_params + params)
+    rows = cur.fetchall()
+    con.close()
+    result = {"data": _pemasok_rows(rows)}
+    if include_total:
+        result["total"] = total
+        result["summary"] = summary
+    return result
+
+
+@app.route("/api/pemasok")
+@jwt_required()
+def api_pemasok():
+    if not check_permission("pembelian_pemasok"):
+        return jsonify({"message": "Akses ditolak"}), 403
+    try:
+        search = request.args.get("search", "")
+        status = request.args.get("status", "")
+        offset = int(request.args.get("offset", 0))
+        limit = int(request.args.get("limit", 50))
+        include_total = request.args.get("include_total", "0") == "1"
+        result = _fetch_pemasok(search, status, offset, limit, include_total)
+        data = filter_record_columns("pemasok", result.get("data", []))
+        if include_total:
+            return jsonify({"data": data, "total": result.get("total", 0), "summary": result.get("summary", {})})
+        return jsonify(data)
+    except Exception as e:
+        print(f"Error api_pemasok: {e}")
+        return jsonify({"data": [], "total": 0, "summary": {}, "error": str(e)}), 500
+
+
+@app.route("/api/pemasok/export")
+@jwt_required()
+def api_pemasok_export():
+    if not check_permission("pembelian_pemasok"):
+        return jsonify({"message": "Akses ditolak"}), 403
+    try:
+        result = _fetch_pemasok(
+            search=request.args.get("search", ""),
+            status=request.args.get("status", ""),
+            offset=0,
+            limit=0,
+            include_total=True,
+        )
+        return jsonify({
+            "data": filter_record_columns("pemasok", result.get("data", [])),
+            "total_rows": result.get("total", 0),
+            "summary": result.get("summary", {}),
+        })
+    except Exception as e:
+        print(f"Error api_pemasok_export: {e}")
+        return jsonify({"data": [], "total_rows": 0, "summary": {}, "error": str(e)}), 500
+
+
+@app.route("/api/pemasok/<int:person_id>/suspended", methods=["POST"])
+@jwt_required()
+def api_pemasok_set_suspended(person_id):
+    if not check_permission("pembelian_pemasok_edit"):
+        return jsonify({"message": "Akses ditolak"}), 403
+    payload = request.get_json(silent=True) or {}
+    suspended = 1 if payload.get("suspended") else 0
+    con = None
+    try:
+        con = fdb.connect(**DB_CONFIG)
+        cur = con.cursor()
+        cur.execute("""
+            SELECT ID, PERSONNO, NAME, SUSPENDED
+            FROM PERSONDATA
+            WHERE ID = ? AND PERSONTYPE = 1
+        """, (person_id,))
+        row = cur.fetchone()
+        if not row:
+            con.close()
+            return jsonify({"message": "Pemasok tidak ditemukan"}), 404
+
+        old_suspended = int(row[3] or 0)
+        cur.execute("UPDATE PERSONDATA SET SUSPENDED = ? WHERE ID = ?", (suspended, person_id))
+        con.commit()
+        con.close()
+
+        user = get_current_user()
+        log_activity(
+            username=user.get("username"),
+            name=user.get("name"),
+            role=user.get("role"),
+            action="update",
+            module="pemasok",
+            description=f"{'Nonaktifkan' if suspended else 'Aktifkan'} pemasok {str(row[1] or '').strip()}",
+            metadata={
+                "id": person_id,
+                "no_pemasok": str(row[1] or "").strip(),
+                "nama_pemasok": str(row[2] or "").strip(),
+                "old_suspended": old_suspended,
+                "new_suspended": suspended,
+            },
+            ip_address=get_request_ip(),
+            user_agent=request.headers.get("User-Agent"),
+        )
+        return jsonify({
+            "message": "Status pemasok berhasil diubah",
+            "id": person_id,
+            "dihentikan": "Ya" if suspended else "Tidak",
+        })
+    except Exception as e:
+        if con:
+            try:
+                con.rollback()
+                con.close()
+            except Exception:
+                pass
+        print(f"Error api_pemasok_set_suspended: {e}")
+        return jsonify({"message": "Gagal mengubah status pemasok", "error": str(e)}), 500
+
 
 @app.route("/api/permintaan")
 @jwt_required()
@@ -4711,6 +6444,8 @@ def _build_so_rows(rows, delivery_map=None, spk_map=None):
         line_closed = int(row[25] or 0) if len(row) > 25 else 0
 
         subtotal  = qty * unit_price * (1 - disc_pc / 100)
+        gross_dpp = qty * unit_price
+        discount_amount = gross_dpp * disc_pc / 100
         ppn_amt   = subtotal * tax_rate / 100 if tax_rate > 0 else 0
         sisa_kirim = max(qty - qty_shipped, 0)
 
@@ -4741,6 +6476,10 @@ def _build_so_rows(rows, delivery_map=None, spk_map=None):
             "uom":              str(row[14] or "").strip(),
             "unit_price":       unit_price,
             "disc_pct":         disc_pc,
+            "discount_amount":  round(discount_amount, 2),
+            "discount_pct":     disc_pc,
+            "gross_dpp":        round(gross_dpp, 2),
+            "dpp_amount":       round(subtotal, 2),
             "ppn_rate":         tax_rate,
             "ppn_amount":       round(ppn_amt, 2),
             "subtotal":         round(subtotal, 2),
@@ -5045,7 +6784,7 @@ def api_penjualan_flow_summary():
                         SUM(
                             COALESCE(det.QUANTITY, 0)
                             * COALESCE(det.UNITPRICE, 0)
-                            * (1 - COALESCE(CAST(det.DISCPC AS DOUBLE PRECISION), 0) / 100)
+                            * (1 - COALESCE(CAST(NULLIF(TRIM(det.DISCPC), '') AS DOUBLE PRECISION), 0) / 100)
                         ) AS sales_amount,
                         MAX(COALESCE(so.CLOSED, 0)) AS header_closed,
                         MAX({line_closed_expr}) AS any_closed
@@ -5078,7 +6817,7 @@ def api_penjualan_flow_summary():
                 SUM(
                     COALESCE(det.QUANTITY, 0)
                     * COALESCE(det.UNITPRICE, 0)
-                    * (1 - COALESCE(CAST(det.DISCPC AS DOUBLE PRECISION), 0) / 100)
+                    * (1 - COALESCE(CAST(NULLIF(TRIM(det.DISCPC), '') AS DOUBLE PRECISION), 0) / 100)
                 )
             {_SO_FROM}
             WHERE {prev_so_where_sql}
@@ -5266,10 +7005,92 @@ def api_dashboard_sales_transactions():
         date_from = request.args.get("date_from", "")
         date_to = request.args.get("date_to", "")
         offset = int(request.args.get("offset", 0))
-        limit = min(int(request.args.get("limit", 100)), 300)
+        limit = min(int(request.args.get("limit", 100)), 100000)
 
-        if detail_type not in ("product", "customer") or not code:
+        if detail_type == "month":
+            month = request.args.get("month", "").strip()
+            try:
+                month_from = datetime.strptime(f"{month}-01", "%Y-%m-%d").date()
+            except ValueError:
+                return jsonify({"data": [], "total_rows": 0, "total_so": 0})
+            if month_from.month == 12:
+                next_month = month_from.replace(year=month_from.year + 1, month=1)
+            else:
+                next_month = month_from.replace(month=month_from.month + 1)
+            month_to = next_month - timedelta(days=1)
+
+            con = fdb.connect(**DB_CONFIG)
+            cur = con.cursor()
+            cur.execute("""
+                SELECT FIRST ? SKIP ?
+                    so.SONO,
+                    so.SODATE,
+                    so.PONO,
+                    SUM(COALESCE(det.QUANTITY, 0) * COALESCE(det.UNITPRICE, 0)) AS GROSS_DPP,
+                    SUM(
+                        COALESCE(det.QUANTITY, 0)
+                        * COALESCE(det.UNITPRICE, 0)
+                        * (COALESCE(CAST(NULLIF(TRIM(det.DISCPC), '') AS DOUBLE PRECISION), 0) / 100)
+                    ) AS DISCOUNT_AMOUNT,
+                    SUM(
+                        COALESCE(det.QUANTITY, 0)
+                        * COALESCE(det.UNITPRICE, 0)
+                        * (1 - COALESCE(CAST(NULLIF(TRIM(det.DISCPC), '') AS DOUBLE PRECISION), 0) / 100)
+                    ) AS DPP_AMOUNT,
+                    MAX(COALESCE(CAST(NULLIF(TRIM(det.DISCPC), '') AS DOUBLE PRECISION), 0)) AS MAX_DISC_PCT
+                FROM SO so
+                LEFT JOIN SODET det ON det.SOID = so.SOID
+                WHERE det.ITEMNO IS NOT NULL
+                  AND so.SODATE >= ?
+                  AND so.SODATE <= ?
+                GROUP BY so.SOID, so.SONO, so.SODATE, so.PONO
+                ORDER BY so.SODATE DESC, so.SONO
+            """, [limit, offset, month_from.isoformat(), month_to.isoformat()])
+            rows = cur.fetchall()
+
+            cur.execute("""
+                SELECT COUNT(DISTINCT so.SOID)
+                FROM SO so
+                LEFT JOIN SODET det ON det.SOID = so.SOID
+                WHERE det.ITEMNO IS NOT NULL
+                  AND so.SODATE >= ?
+                  AND so.SODATE <= ?
+            """, [month_from.isoformat(), month_to.isoformat()])
+            total_so = int((cur.fetchone() or [0])[0] or 0)
+            con.close()
+
+            data = []
+            total_dpp = 0
+            total_discount = 0
+            for row in rows:
+                discount_amount = float(row[4] or 0)
+                dpp_amount = float(row[5] or 0)
+                total_dpp += dpp_amount
+                total_discount += discount_amount
+                data.append({
+                    "no_so": str(row[0] or "").strip(),
+                    "tgl_so": str(row[1]) if row[1] else "",
+                    "no_po": str(row[2] or "").strip(),
+                    "gross_dpp": float(row[3] or 0),
+                    "discount_amount": round(discount_amount, 2),
+                    "discount_pct": float(row[6] or 0),
+                    "dpp_amount": round(dpp_amount, 2),
+                })
+
+            return jsonify({
+                "data": data,
+                "total_rows": total_so,
+                "total_so": total_so,
+                "summary": {
+                    "total_dpp": round(total_dpp, 2),
+                    "total_discount": round(total_discount, 2),
+                },
+            })
+
+        if detail_type not in ("product", "customer", "code_product") or (detail_type != "code_product" and not code):
             return jsonify({"data": [], "total_rows": 0, "total_so": 0})
+
+        limit = min(limit, 300)
 
         con = fdb.connect(**DB_CONFIG)
         cur = con.cursor()
@@ -5280,6 +7101,13 @@ def api_dashboard_sales_transactions():
         if detail_type == "product":
             where_sql += " AND det.ITEMNO = ?"
             params_where.append(code)
+        elif detail_type == "code_product":
+            code_product_expr = _stock_code_product_expr(cur)
+            if code == "__EMPTY__":
+                where_sql += f" AND COALESCE(TRIM({code_product_expr}), '') = ''"
+            else:
+                where_sql += f" AND UPPER(TRIM({code_product_expr})) = UPPER(?)"
+                params_where.append(code)
         else:
             where_sql += " AND pd.PERSONNO = ?"
             params_where.append(code)
@@ -5546,7 +7374,8 @@ def api_penjualan_export():
 # Tgl Selesai: MAX(ITEMHIST.TXDATE) WHERE TXTYPE='FIN' AND INVOICEID=WODET.ID
 #
 # STATUS WODET di database ini: 0=Diproses, 1=Ditutup, 2=Selesai
-# TIPEPERSEDIAAN: 0=Non-Persediaan 1=Bahan Baku 2=Barang Jadi 3=WIP 4=Lainnya
+# TIPEPERSEDIAAN Easy: 0=Barang Jadi, 1=Non-Persediaan,
+# 2=Barang Setengah Jadi, 3=Bahan Baku Pembantu, 4=Bahan Baku
 
 # ─── FORMULA PRODUK (BOM) ────────────────────────────────────────────────────
 def _formula_where_clause(search="", category="", status=""):
@@ -5734,13 +7563,13 @@ def _biaya_produksi_where_clause(search="", account="", status=""):
     params = []
 
     if search:
-        keyword = search.strip().lower()
+        keyword = f"%{search.strip()}%"
         conditions.append("""
             (
-                LOWER(CAST(d.DLABORNO AS VARCHAR(255))) CONTAINING ?
-                OR LOWER(CAST(d.DESCRIPTION AS VARCHAR(255))) CONTAINING ?
-                OR LOWER(CAST(d.GLACCOUNT AS VARCHAR(255))) CONTAINING ?
-                OR LOWER(CAST(g.ACCOUNTNAME AS VARCHAR(255))) CONTAINING ?
+                UPPER(CAST(d.DLABORNO AS VARCHAR(255))) LIKE UPPER(?)
+                OR UPPER(CAST(d.DESCRIPTION AS VARCHAR(255))) LIKE UPPER(?)
+                OR UPPER(CAST(d.GLACCOUNT AS VARCHAR(255))) LIKE UPPER(?)
+                OR UPPER(CAST(g.ACCOUNTNAME AS VARCHAR(255))) LIKE UPPER(?)
             )
         """)
         params.extend([keyword, keyword, keyword, keyword])
@@ -5890,12 +7719,12 @@ def _standarisasi_harga_where_clause(search="", status="", date_from="", date_to
     params = []
 
     if search:
-        keyword = search.strip().lower()
+        keyword = f"%{search.strip()}%"
         conditions.append("""
             (
-                LOWER(CAST(s.NOSTANDARBRG AS VARCHAR(255))) CONTAINING ?
-                OR LOWER(CAST(s.DEKSRIPSI AS VARCHAR(255))) CONTAINING ?
-                OR LOWER(CAST(t.NAME AS VARCHAR(255))) CONTAINING ?
+                UPPER(CAST(s.NOSTANDARBRG AS VARCHAR(255))) LIKE UPPER(?)
+                OR UPPER(CAST(s.DEKSRIPSI AS VARCHAR(255))) LIKE UPPER(?)
+                OR UPPER(CAST(t.NAME AS VARCHAR(255))) LIKE UPPER(?)
             )
         """)
         params.extend([keyword, keyword, keyword])
@@ -5956,6 +7785,16 @@ FIFO_CATEGORIES = (
     "Barang Setengah Jadi",
 )
 
+FIFO_FROM_SQL = """
+    FROM ITEM i
+    LEFT JOIN ITEMCATEGORY c ON c.CATEGORYID = i.CATEGORYID
+    LEFT JOIN (
+        SELECT ITEMNO, SUM(QUANTITY) AS STOCK_QTY
+        FROM ITEMHIST
+        GROUP BY ITEMNO
+    ) s ON s.ITEMNO = i.ITEMNO
+"""
+
 
 def _fifo_item_unit_exprs(cur):
     columns = set(_get_table_columns(cur, "ITEM"))
@@ -5971,26 +7810,30 @@ def _fifo_item_unit_exprs(cur):
     }
 
 
+def _fifo_where_clause(search="", stock_qty_expr="COALESCE((SELECT SUM(h.QUANTITY) FROM ITEMHIST h WHERE h.ITEMNO = i.ITEMNO), 0)"):
+    params = list(FIFO_CATEGORIES)
+    conditions = [
+        "COALESCE(i.ITEMTYPE, 0) = 0",
+        "COALESCE(i.SUSPENDED, 0) = 0",
+        f"COALESCE(c.NAME, '') IN ({_build_in_clause(FIFO_CATEGORIES)})",
+        f"{stock_qty_expr} > 0",
+    ]
+    if search:
+        conditions.append("""(
+            LOWER(i.ITEMNO) CONTAINING LOWER(?)
+            OR LOWER(i.ITEMDESCRIPTION) CONTAINING LOWER(?)
+            OR LOWER(COALESCE(c.NAME, '')) CONTAINING LOWER(?)
+        )""")
+        params.extend([search, search, search])
+    return " AND ".join(conditions), params
+
+
 def _fifo_convert_stock(quantity, ratio):
     qty = float(quantity or 0)
     ratio_value = float(ratio or 0)
     if not ratio_value:
         return None
     return qty / ratio_value
-
-
-def _fifo_date_filter_clause(date_from="", date_to=""):
-    conditions = []
-    params = []
-    if str(date_from or "").strip():
-        conditions.append("s.LAST_STOCK_TXDATE >= ?")
-        params.append(str(date_from).strip())
-    if str(date_to or "").strip():
-        conditions.append("s.LAST_STOCK_TXDATE <= ?")
-        params.append(str(date_to).strip())
-    if not conditions:
-        return "", []
-    return f"AND {' AND '.join(conditions)}", params
 
 
 def _fetch_fifo_cost_map(cur, item_nos):
@@ -6015,7 +7858,7 @@ def _fetch_fifo_cost_map(cur, item_nos):
                         h.DESCRIPTION
                     FROM ITEMHIST h
                     WHERE h.ITEMNO IN ({_build_in_clause(chunk)})
-                      AND h.QUANTITY > 0
+                      AND COALESCE(h.QUANTITY, 0) > 0
                     ORDER BY h.ITEMNO, h.TXDATE, h.ITEMHISTID
                 """, chunk)
                 incoming_rows.extend(cur.fetchall())
@@ -6046,8 +7889,11 @@ def _fetch_fifo_cost_map(cur, item_nos):
                     result[key] = {
                         "harga_fifo": cost,
                         "nilai_stock": 0.0,
-                        "txdate": txdate.isoformat() if txdate else "",
                         "sumber_harga": "FIFO",
+                        "fifo_layer_itemhist_id": hist_key,
+                        "fifo_layer_date": str(txdate) if txdate else "",
+                        "fifo_layer_qty": remaining_qty,
+                        "fifo_layer_description": str(description or "").strip(),
                     }
                 result[key]["nilai_stock"] = float(result[key].get("nilai_stock") or 0) + (remaining_qty * cost)
         except Exception as fifo_error:
@@ -6072,7 +7918,6 @@ def _fetch_fifo_cost_map(cur, item_nos):
             result[item_no] = {
                 "harga_fifo": float(unit_cost or 0),
                 "nilai_stock": None,
-                "txdate": _txdate.isoformat() if _txdate else "",
                 "sumber_harga": "Riwayat biaya terakhir",
             }
     return result
@@ -6085,7 +7930,6 @@ def _build_fifo_rows(rows, cost_by_item):
         stock_qty = float(row[4] or 0)
         ratio2 = float(row[7] or 0)
         ratio3 = float(row[8] or 0)
-        last_stock_txdate = row[9] if len(row) > 9 else None
         cost_info = cost_by_item.get(item_no, {})
         harga_fifo = float(cost_info.get("harga_fifo") or 0)
         nilai_stock = cost_info.get("nilai_stock")
@@ -6103,32 +7947,44 @@ def _build_fifo_rows(rows, cost_by_item):
             "stok_satuan_3": None if not str(row[6] or "").strip() else round(_fifo_convert_stock(stock_qty, ratio3) or 0, 4),
             "harga_fifo": round(harga_fifo, 4),
             "nilai_stock": round(float(nilai_stock or 0), 2),
-            "txdate": str(cost_info.get("txdate") or "").strip(),
-            "last_stock_txdate": last_stock_txdate.isoformat() if last_stock_txdate else "",
             "sumber_harga": str(cost_info.get("sumber_harga") or "").strip(),
         })
     return data
 
 
-def _get_fifo_summary_counts(cur, date_from="", date_to=""):
-    date_sql, date_params = _fifo_date_filter_clause(date_from, date_to)
+def _fifo_fetch_stock_by_item(cur, item_nos):
+    result = {}
+    items = sorted({str(item or "").strip() for item in item_nos if str(item or "").strip()})
+    for start in range(0, len(items), 900):
+        chunk = items[start:start + 900]
+        cur.execute(f"""
+            SELECT ITEMNO, SUM(QUANTITY)
+            FROM ITEMHIST
+            WHERE ITEMNO IN ({_build_in_clause(chunk)})
+            GROUP BY ITEMNO
+        """, chunk)
+        for item_no, stock_qty in cur.fetchall():
+            result[str(item_no or "").strip()] = float(stock_qty or 0)
+    return result
+
+
+def _get_fifo_summary_counts(cur):
     cur.execute(f"""
         SELECT COALESCE(c.NAME, ''), COUNT(*)
-        FROM ITEM i
-        LEFT JOIN ITEMCATEGORY c ON c.CATEGORYID = i.CATEGORYID
-        LEFT JOIN (
-            SELECT ITEMNO, SUM(QUANTITY) AS STOCK_QTY, MAX(TXDATE) AS LAST_STOCK_TXDATE
+        FROM (
+            SELECT ITEMNO, SUM(QUANTITY) AS STOCK_QTY
             FROM ITEMHIST
             GROUP BY ITEMNO
-        ) s ON s.ITEMNO = i.ITEMNO
+            HAVING SUM(QUANTITY) > 0
+        ) s
+        JOIN ITEM i ON i.ITEMNO = s.ITEMNO
+        LEFT JOIN ITEMCATEGORY c ON c.CATEGORYID = i.CATEGORYID
         WHERE COALESCE(i.ITEMTYPE, 0) = 0
           AND COALESCE(i.SUSPENDED, 0) = 0
           AND COALESCE(c.NAME, '') IN ({_build_in_clause(FIFO_CATEGORIES)})
-          AND COALESCE(s.STOCK_QTY, 0) > 0
-          {date_sql}
         GROUP BY c.NAME
         ORDER BY c.NAME
-    """, list(FIFO_CATEGORIES) + date_params)
+    """, list(FIFO_CATEGORIES))
     categories = [
         {"category": str(category or "").strip(), "count": int(count or 0)}
         for category, count in cur.fetchall()
@@ -6136,10 +7992,9 @@ def _get_fifo_summary_counts(cur, date_from="", date_to=""):
     return categories, sum(item["count"] for item in categories)
 
 
-def _get_fifo_search_data(cur, search="", offset=0, limit=50, include_total=False, date_from="", date_to=""):
+def _get_fifo_search_data(cur, search="", offset=0, limit=50, include_total=False):
     unit_exprs = _fifo_item_unit_exprs(cur)
-    date_sql, date_params = _fifo_date_filter_clause(date_from, date_to)
-    params = list(FIFO_CATEGORIES) + date_params
+    params = list(FIFO_CATEGORIES)
     search_sql = ""
     if search:
         search_sql = """AND (
@@ -6155,39 +8010,38 @@ def _get_fifo_search_data(cur, search="", offset=0, limit=50, include_total=Fals
             i.ITEMDESCRIPTION,
             c.NAME,
             i.UNIT1,
-            COALESCE(s.STOCK_QTY, 0),
             {unit_exprs["unit2"]},
             {unit_exprs["unit3"]},
             {unit_exprs["ratio2"]},
-            {unit_exprs["ratio3"]},
-            s.LAST_STOCK_TXDATE
+            {unit_exprs["ratio3"]}
         FROM ITEM i
         LEFT JOIN ITEMCATEGORY c ON c.CATEGORYID = i.CATEGORYID
-        LEFT JOIN (
-            SELECT ITEMNO, SUM(QUANTITY) AS STOCK_QTY, MAX(TXDATE) AS LAST_STOCK_TXDATE
-            FROM ITEMHIST
-            GROUP BY ITEMNO
-        ) s ON s.ITEMNO = i.ITEMNO
         WHERE COALESCE(i.ITEMTYPE, 0) = 0
           AND COALESCE(i.SUSPENDED, 0) = 0
           AND COALESCE(c.NAME, '') IN ({_build_in_clause(FIFO_CATEGORIES)})
-          AND COALESCE(s.STOCK_QTY, 0) > 0
-          {date_sql}
           {search_sql}
         ORDER BY c.NAME, i.ITEMNO
     """, params)
     candidate_rows = cur.fetchall()
-    
-    total = len(candidate_rows)
-    page_rows = candidate_rows[offset:offset + limit]
+    stock_by_item = _fifo_fetch_stock_by_item(cur, [row[0] for row in candidate_rows])
+    rows = []
+    category_counts = {}
+    for row in candidate_rows:
+        item_no = str(row[0] or "").strip()
+        stock_qty = float(stock_by_item.get(item_no, 0) or 0)
+        if stock_qty <= 0:
+            continue
+        category = str(row[2] or "").strip()
+        category_counts[category] = category_counts.get(category, 0) + 1
+        rows.append((
+            row[0], row[1], row[2], row[3], stock_qty,
+            row[4], row[5], row[6], row[7],
+        ))
+
+    total = len(rows)
+    page_rows = rows[offset:offset + limit]
     data = _build_fifo_rows(page_rows, _fetch_fifo_cost_map(cur, [row[0] for row in page_rows]))
-    
     if include_total:
-        category_counts = {}
-        for row in candidate_rows:
-            category = str(row[2] or "").strip()
-            category_counts[category] = category_counts.get(category, 0) + 1
-            
         return {
             "data": data,
             "total": total,
@@ -6203,64 +8057,135 @@ def _get_fifo_search_data(cur, search="", offset=0, limit=50, include_total=Fals
     return data
 
 
-def _get_fifo_page_data(cur, offset=0, limit=50, include_total=False, date_from="", date_to=""):
+def _get_fifo_page_data(cur, offset=0, limit=50, include_total=False):
     unit_exprs = _fifo_item_unit_exprs(cur)
-    date_sql, date_params = _fifo_date_filter_clause(date_from, date_to)
-    cur.execute(f"""
-        SELECT FIRST ? SKIP ?
-            i.ITEMNO,
-            i.ITEMDESCRIPTION,
-            c.NAME,
-            i.UNIT1,
-            COALESCE(s.STOCK_QTY, 0),
-            {unit_exprs["unit2"]},
-            {unit_exprs["unit3"]},
-            {unit_exprs["ratio2"]},
-            {unit_exprs["ratio3"]},
-            s.LAST_STOCK_TXDATE
-        FROM ITEM i
-        LEFT JOIN ITEMCATEGORY c ON c.CATEGORYID = i.CATEGORYID
-        LEFT JOIN (
-            SELECT ITEMNO, SUM(QUANTITY) AS STOCK_QTY, MAX(TXDATE) AS LAST_STOCK_TXDATE
-            FROM ITEMHIST
-            GROUP BY ITEMNO
-        ) s ON s.ITEMNO = i.ITEMNO
-        WHERE COALESCE(i.ITEMTYPE, 0) = 0
-          AND COALESCE(i.SUSPENDED, 0) = 0
-          AND COALESCE(c.NAME, '') IN ({_build_in_clause(FIFO_CATEGORIES)})
-          AND COALESCE(s.STOCK_QTY, 0) > 0
-          {date_sql}
-        ORDER BY c.NAME, i.ITEMNO
-    """, [limit, offset] + list(FIFO_CATEGORIES) + date_params)
-    
-    page_rows = cur.fetchall()
-    
-    # We no longer need to check stock in python, the database did it for us
+    target_count = offset + limit
+    collected = []
+    candidate_skip = 0
+    candidate_limit = max(min(limit * 3, 150), 50)
+    scanned_all = False
+
+    while len(collected) < target_count:
+        cur.execute(f"""
+            SELECT FIRST ? SKIP ?
+                i.ITEMNO,
+                i.ITEMDESCRIPTION,
+                c.NAME,
+                i.UNIT1,
+                {unit_exprs["unit2"]},
+                {unit_exprs["unit3"]},
+                {unit_exprs["ratio2"]},
+                {unit_exprs["ratio3"]}
+            FROM ITEM i
+            LEFT JOIN ITEMCATEGORY c ON c.CATEGORYID = i.CATEGORYID
+            WHERE COALESCE(i.ITEMTYPE, 0) = 0
+              AND COALESCE(i.SUSPENDED, 0) = 0
+              AND COALESCE(c.NAME, '') IN ({_build_in_clause(FIFO_CATEGORIES)})
+            ORDER BY c.NAME, i.ITEMNO
+        """, [candidate_limit, candidate_skip] + list(FIFO_CATEGORIES))
+        candidate_rows = cur.fetchall()
+        if not candidate_rows:
+            scanned_all = True
+            break
+
+        stock_by_item = _fifo_fetch_stock_by_item(cur, [row[0] for row in candidate_rows])
+        for row in candidate_rows:
+            item_no = str(row[0] or "").strip()
+            stock_qty = float(stock_by_item.get(item_no, 0) or 0)
+            if stock_qty <= 0:
+                continue
+            collected.append((
+                row[0], row[1], row[2], row[3], stock_qty,
+                row[4], row[5], row[6], row[7],
+            ))
+            if len(collected) >= target_count:
+                break
+        candidate_skip += candidate_limit
+
+    page_rows = collected[offset:offset + limit]
     data = _build_fifo_rows(page_rows, _fetch_fifo_cost_map(cur, [row[0] for row in page_rows]))
-    
-    categories, total_items = _get_fifo_summary_counts(cur, date_from, date_to)
+    has_next = not scanned_all or len(collected) > offset + len(page_rows)
+    categories, total_items = _get_fifo_summary_counts(cur)
+    total_estimate = total_items or (len(collected) if scanned_all else max(offset + len(page_rows) + (1 if has_next else 0), len(collected)))
     summary = {
-        "total_items": total_items,
+        "total_items": total_estimate,
         "total_stock_value": round(sum(float(row.get("nilai_stock") or 0) for row in data), 2),
         "categories": categories,
     }
     if include_total:
-        return {"data": data, "total": total_items, "summary": summary}
+        return {"data": data, "total": total_estimate, "summary": summary}
     return data
 
 
-def get_fifo_data(search="", offset=0, limit=50, include_total=False, date_from="", date_to=""):
+def get_fifo_data(search="", offset=0, limit=50, include_total=False):
     try:
         con = fdb.connect(**DB_CONFIG)
         cur = con.cursor()
         if str(search or "").strip():
-            result = _get_fifo_search_data(cur, search, offset, limit, include_total, date_from, date_to)
+            result = _get_fifo_search_data(cur, search, offset, limit, include_total)
             con.close()
             return result
 
-        result = _get_fifo_page_data(cur, offset, limit, include_total, date_from, date_to)
+        result = _get_fifo_page_data(cur, offset, limit, include_total)
         con.close()
         return result
+
+        unit_exprs = _fifo_item_unit_exprs(cur)
+        where_sql, params = _fifo_where_clause(search)
+
+        total = None
+        summary = None
+        if include_total:
+            cur.execute(f"""
+                SELECT COUNT(*)
+                FROM ITEM i
+                LEFT JOIN ITEMCATEGORY c ON c.CATEGORYID = i.CATEGORYID
+                WHERE {where_sql}
+            """, params)
+            total = int(cur.fetchone()[0] or 0)
+
+        cur.execute(f"""
+            SELECT FIRST ? SKIP ?
+                i.ITEMNO,
+                i.ITEMDESCRIPTION,
+                c.NAME,
+                i.UNIT1,
+                COALESCE((SELECT SUM(h.QUANTITY) FROM ITEMHIST h WHERE h.ITEMNO = i.ITEMNO), 0),
+                {unit_exprs["unit2"]},
+                {unit_exprs["unit3"]},
+                {unit_exprs["ratio2"]},
+                {unit_exprs["ratio3"]}
+            FROM ITEM i
+            LEFT JOIN ITEMCATEGORY c ON c.CATEGORYID = i.CATEGORYID
+            WHERE {where_sql}
+            ORDER BY c.NAME, i.ITEMNO
+        """, [limit, offset] + params)
+        rows = cur.fetchall()
+        item_nos = [str(row[0] or "").strip() for row in rows]
+        data = _build_fifo_rows(rows, _fetch_fifo_cost_map(cur, item_nos))
+
+        if include_total:
+            cur.execute(f"""
+                SELECT c.NAME, COUNT(*)
+                FROM ITEM i
+                LEFT JOIN ITEMCATEGORY c ON c.CATEGORYID = i.CATEGORYID
+                WHERE {where_sql}
+                GROUP BY c.NAME
+                ORDER BY c.NAME
+            """, params)
+            categories = [
+                {"category": str(category or "").strip(), "count": int(count or 0)}
+                for category, count in cur.fetchall()
+            ]
+            summary = {
+                "total_items": total or 0,
+                "total_stock_value": round(sum(float(row.get("nilai_stock") or 0) for row in data), 2),
+                "categories": categories,
+            }
+        con.close()
+        if include_total:
+            return {"data": data, "total": total or 0, "summary": summary}
+        return data
     except Exception as e:
         print(f"Error get_fifo_data: {e}")
         empty = {"data": [], "total": 0, "summary": {"total_items": 0, "total_stock_value": 0, "categories": []}}
@@ -6277,8 +8202,6 @@ def api_fifo():
         offset=max(int(request.args.get("offset", 0)), 0),
         limit=min(max(int(request.args.get("limit", 50)), 1), 500),
         include_total=True,
-        date_from=request.args.get("date_from", ""),
-        date_to=request.args.get("date_to", ""),
     )
     return jsonify({
         "data": filter_record_columns("fifo", result.get("data", [])),
@@ -6297,314 +8220,10 @@ def api_fifo_export():
         offset=0,
         limit=500000,
         include_total=False,
-        date_from=request.args.get("date_from", ""),
-        date_to=request.args.get("date_to", ""),
     )
     data = filter_record_columns("fifo", data)
     return jsonify({"data": data, "total_rows": len(data)})
 
-
-@app.route("/api/standarisasi-material")
-@jwt_required()
-def api_integration_standarisasi_material():
-    # Bypass explicit role checks here because the integration token 
-    # provides an 'admin' role, but get_current_user dynamically re-fetches permissions
-    # based on the role name, which might be missing in sqlite if not setup correctly.
-    # We will rely on JWT claims directly to authorize the integration client.
-    claims = get_jwt()
-    # Accept identity "integration-calculator" or role "admin" without sqlite permission check
-    is_integration = claims.get("sub") == "integration-calculator" or claims.get("identity") == "integration-calculator" or get_jwt_identity() == "integration-calculator"
-    is_admin = claims.get("role") == "admin"
-    if not is_integration and not is_admin:
-        if not check_permission("spk_standarisasi_harga"):
-            return jsonify({"message": "Akses ditolak"}), 403
-    try:
-        offset = max(int(request.args.get("offset", 0)), 0)
-        limit = min(max(int(request.args.get("limit", 100)), 1), 500)
-        search = request.args.get("search", "").strip()
-        description = request.args.get("description", "").strip()
-
-        # Check Redis Cache
-        cache_key = f"standarisasi_material:{offset}:{limit}:{search}:{description}"
-        if redis_client:
-            try:
-                cached_data = redis_client.get(cache_key)
-                if cached_data:
-                    return jsonify(json.loads(cached_data))
-            except Exception as e:
-                app.logger.warning(f"Redis cache get error: {e}")
-
-        con = fdb.connect(**DB_CONFIG)
-        cur = con.cursor()
-
-        where_clause = ""
-        params = []
-        
-        conditions = []
-        if search:
-            conditions.append("""
-                (
-                    UPPER(i.ITEMNO) CONTAINING UPPER(?) 
-                    OR UPPER(i.ITEMDESCRIPTION) CONTAINING UPPER(?)
-                    OR UPPER(curr.NOSTANDARBRG) CONTAINING UPPER(?)
-                )
-            """)
-            params.extend([search, search, search])
-            
-        if description:
-            conditions.append("UPPER(i.ITEMDESCRIPTION) CONTAINING UPPER(?)")
-            params.append(description)
-            
-        if conditions:
-            where_clause = " AND " + " AND ".join(conditions)
-
-        # We need the LATEST standard cost per item, filtered by raw material categories
-        sql = f"""
-            WITH RankedStandards AS (
-                SELECT 
-                    d.ITEMNO,
-                    s.NOSTANDARBRG,
-                    s.TGLMULAIBRG,
-                    d.NEWCOST,
-                    ROW_NUMBER() OVER (PARTITION BY d.ITEMNO ORDER BY s.TGLMULAIBRG DESC, s.IDSTANDARBRG DESC) as rn
-                FROM STANDARBIAYABRGDET d
-                JOIN STANDARBIAYABRG s ON s.NOSTANDARBRG = d.NOSTANDARBRG
-                WHERE s.STATUS = 1
-            ),
-            LatestStandard AS (
-                SELECT * FROM RankedStandards WHERE rn = 1
-            ),
-            PreviousStandard AS (
-                SELECT * FROM RankedStandards WHERE rn = 2
-            )
-            SELECT FIRST {limit} SKIP {offset}
-                i.ITEMNO,
-                i.ITEMDESCRIPTION,
-                c.NAME AS JENIS_PERSEDIAAN,
-                COALESCE((
-                    SELECT FIRST 1
-                        CASE
-                            WHEN COALESCE(h.QUANTITY, 0) < 0
-                                 AND COALESCE(h.QUANTITY, 0) <> 0
-                            THEN ABS(COALESCE(h.COST, 0) / h.QUANTITY)
-                            ELSE COALESCE(h.COST, 0)
-                        END
-                    FROM ITEMHIST h
-                    WHERE h.ITEMNO = i.ITEMNO
-                      AND COALESCE(h.COST, 0) <> 0
-                    ORDER BY h.TXDATE DESC, h.ITEMHISTID DESC
-                ), 0) AS HARGA_AWAL,
-                COALESCE(prev.NEWCOST, 0) AS HARGA_LAMA,
-                COALESCE(curr.NEWCOST, 0) AS HARGA_BARU,
-                curr.NOSTANDARBRG AS NO_STB
-                FROM ITEM i
-                JOIN ITEMCATEGORY c ON c.CATEGORYID = i.CATEGORYID
-                JOIN LatestStandard curr ON curr.ITEMNO = i.ITEMNO
-                LEFT JOIN PreviousStandard prev ON prev.ITEMNO = i.ITEMNO
-                WHERE (UPPER(c.NAME) CONTAINING 'BAHAN BAKU' 
-                   OR UPPER(c.NAME) CONTAINING 'BAHAN PEMBANTU'
-                   OR UPPER(c.NAME) CONTAINING 'RAW MATERIAL'
-                   OR UPPER(c.NAME) CONTAINING 'BAHAN')
-                   {where_clause}
-                ORDER BY i.ITEMNO
-            """
-        
-        cur.execute(sql, params)
-        rows = cur.fetchall()
-        
-        # Count total
-        count_sql = f"""
-            WITH RankedStandards AS (
-                SELECT 
-                    d.ITEMNO,
-                    s.NOSTANDARBRG,
-                    s.TGLMULAIBRG,
-                    ROW_NUMBER() OVER (PARTITION BY d.ITEMNO ORDER BY s.TGLMULAIBRG DESC, s.IDSTANDARBRG DESC) as rn
-                FROM STANDARBIAYABRGDET d
-                JOIN STANDARBIAYABRG s ON s.NOSTANDARBRG = d.NOSTANDARBRG
-                WHERE s.STATUS = 1
-            ),
-            LatestStandard AS (
-                SELECT * FROM RankedStandards WHERE rn = 1
-            )
-            SELECT COUNT(DISTINCT i.ITEMNO)
-            FROM ITEM i
-            JOIN ITEMCATEGORY c ON c.CATEGORYID = i.CATEGORYID
-            JOIN LatestStandard curr ON curr.ITEMNO = i.ITEMNO
-            WHERE (UPPER(c.NAME) CONTAINING 'BAHAN BAKU' 
-               OR UPPER(c.NAME) CONTAINING 'BAHAN PEMBANTU'
-               OR UPPER(c.NAME) CONTAINING 'RAW MATERIAL'
-               OR UPPER(c.NAME) CONTAINING 'BAHAN')
-               {where_clause}
-        """
-        cur.execute(count_sql, params)
-        total = int(cur.fetchone()[0] or 0)
-        
-        con.close()
-        
-        data = []
-        for row in rows:
-            data.append({
-                "kode_material": str(row[0] or "").strip(),
-                "deskripsi_barang": str(row[1] or "").strip(),
-                "jenis_persediaan": str(row[2] or "").strip(),
-                "harga_standarisasi_awal": float(row[3] or 0),
-                "harga_standarisasi_terakhir": float(row[4] or 0),
-                "harga_standarisasi_baru": float(row[5] or 0),
-                "no_stb": str(row[6] or "").strip(),
-            })
-
-        response_data = {
-            "data": data,
-            "total": total
-        }
-
-        # Save to Redis Cache (10 minutes = 600 seconds)
-        if redis_client:
-            try:
-                redis_client.setex(cache_key, 600, json.dumps(response_data))
-            except Exception as e:
-                app.logger.warning(f"Redis cache set error: {e}")
-
-        return jsonify(response_data)
-    except Exception as e:
-        print(f"Error api_integration_standarisasi_material: {e}")
-        return jsonify({"message": str(e)}), 500
-
-@app.route("/api/standarisasi-material/bulk", methods=["POST"])
-@jwt_required()
-def api_integration_standarisasi_material_bulk():
-    claims = get_jwt()
-    is_integration = claims.get("sub") == "integration-calculator" or claims.get("identity") == "integration-calculator" or get_jwt_identity() == "integration-calculator"
-    is_admin = claims.get("role") == "admin"
-    if not is_integration and not is_admin:
-        if not check_permission("spk_standarisasi_harga"):
-            return jsonify({"message": "Akses ditolak"}), 403
-            
-    payload = request.get_json(silent=True) or {}
-    part_numbers = payload.get("part_numbers", [])
-    if not isinstance(part_numbers, list) or not part_numbers:
-        return jsonify({"data": [], "total": 0})
-        
-    try:
-        con = fdb.connect(**DB_CONFIG)
-        cur = con.cursor()
-        
-        all_data = []
-        # Clean and filter empty values
-        clean_parts = list(set([str(p).strip() for p in part_numbers if str(p).strip()]))
-        
-        for start in range(0, len(clean_parts), 900):
-            chunk = clean_parts[start:start+900]
-            in_clause = _build_in_clause(chunk)
-            
-            sql = f"""
-                WITH RankedStandards AS (
-                    SELECT 
-                        d.ITEMNO,
-                        s.NOSTANDARBRG,
-                        s.TGLMULAIBRG,
-                        d.NEWCOST,
-                        ROW_NUMBER() OVER (PARTITION BY d.ITEMNO ORDER BY s.TGLMULAIBRG DESC, s.IDSTANDARBRG DESC) as rn
-                    FROM STANDARBIAYABRGDET d
-                    JOIN STANDARBIAYABRG s ON s.NOSTANDARBRG = d.NOSTANDARBRG
-                    WHERE s.STATUS = 1
-                ),
-                LatestStandard AS (
-                    SELECT * FROM RankedStandards WHERE rn = 1
-                ),
-                PreviousStandard AS (
-                    SELECT * FROM RankedStandards WHERE rn = 2
-                )
-                SELECT 
-                    i.ITEMNO,
-                    i.ITEMDESCRIPTION,
-                    c.NAME AS JENIS_PERSEDIAAN,
-                    COALESCE((
-                        SELECT FIRST 1
-                            CASE
-                                WHEN COALESCE(h.QUANTITY, 0) < 0
-                                     AND COALESCE(h.QUANTITY, 0) <> 0
-                                THEN ABS(COALESCE(h.COST, 0) / h.QUANTITY)
-                                ELSE COALESCE(h.COST, 0)
-                            END
-                        FROM ITEMHIST h
-                        WHERE h.ITEMNO = i.ITEMNO
-                          AND COALESCE(h.COST, 0) <> 0
-                        ORDER BY h.TXDATE DESC, h.ITEMHISTID DESC
-                    ), 0) AS HARGA_AWAL,
-                    COALESCE(prev.NEWCOST, 0) AS HARGA_LAMA,
-                    COALESCE(curr.NEWCOST, 0) AS HARGA_BARU,
-                    curr.NOSTANDARBRG AS NO_STB
-                FROM ITEM i
-                JOIN ITEMCATEGORY c ON c.CATEGORYID = i.CATEGORYID
-                LEFT JOIN LatestStandard curr ON curr.ITEMNO = i.ITEMNO
-                LEFT JOIN PreviousStandard prev ON prev.ITEMNO = i.ITEMNO
-                WHERE i.ITEMNO IN ({in_clause})
-            """
-            cur.execute(sql, chunk)
-            for row in cur.fetchall():
-                all_data.append({
-                    "kode_material": str(row[0] or "").strip(),
-                    "deskripsi_barang": str(row[1] or "").strip(),
-                    "jenis_persediaan": str(row[2] or "").strip(),
-                    "harga_standarisasi_awal": float(row[3] or 0),
-                    "harga_standarisasi_terakhir": float(row[4] or 0),
-                    "harga_standarisasi_baru": float(row[5] or 0),
-                    "no_stb": str(row[6] or "").strip(),
-                })
-        
-        con.close()
-        return jsonify({"data": all_data, "total": len(all_data)})
-        
-    except Exception as e:
-        print(f"Error api_integration_standarisasi_material_bulk: {e}")
-        return jsonify({"message": str(e)}), 500
-
-@app.route("/api/integration/biaya-produksi")
-@jwt_required()
-def api_integration_biaya_produksi():
-    claims = get_jwt()
-    is_integration = claims.get("sub") == "integration-calculator" or claims.get("identity") == "integration-calculator" or get_jwt_identity() == "integration-calculator"
-    is_admin = claims.get("role") == "admin"
-    if not is_integration and not is_admin:
-        if not check_permission("spk_biaya_produksi"):
-            return jsonify({"message": "Akses ditolak"}), 403
-            
-    try:
-        search = request.args.get("search", "")
-        account = request.args.get("account", "")
-        status = request.args.get("status", "")
-        offset = max(int(request.args.get("offset", 0)), 0)
-        limit = min(max(int(request.args.get("limit", 50)), 1), 500)
-
-        con = fdb.connect(**DB_CONFIG)
-        cur = con.cursor()
-        where_sql, params = _biaya_produksi_where_clause(search, account, status)
-
-        cur.execute(f"""
-            SELECT COUNT(*)
-            {_BIAYA_PRODUKSI_FROM}
-            WHERE {where_sql}
-        """, params)
-        total = int(cur.fetchone()[0] or 0)
-
-        cur.execute(f"""
-            SELECT FIRST ? SKIP ? {_BIAYA_PRODUKSI_SELECT}
-            {_BIAYA_PRODUKSI_FROM}
-            WHERE {where_sql}
-            ORDER BY d.DLABORNO
-        """, [limit, offset] + params)
-        data = _build_biaya_produksi_rows(cur.fetchall())
-
-        con.close()
-        return jsonify({
-            "data": filter_record_columns("biaya_produksi", data),
-            "total": total
-        })
-    except Exception as e:
-        print(f"Error api_integration_biaya_produksi: {e}")
-        return jsonify({"data": [], "total": 0, "error": str(e)}), 500
 
 @app.route("/api/standarisasi-harga")
 @jwt_required()
@@ -6767,24 +8386,16 @@ def api_standarisasi_harga_details(standar_id):
             effective_date, effective_date, standar_id,
             standard_no,
         ])
-        data = []
-        for row in cur.fetchall():
-            biaya_barang = float(row[4] or 0)
-            biaya_standar_terakhir = float(row[5] or 0)
-            no_standar_terakhir = str(row[6] or "").strip()
-            if biaya_standar_terakhir <= 0:
-                biaya_standar_terakhir = biaya_barang
-
-            data.append({
-                "detail_id": int(row[0] or 0),
-                "no_barang": str(row[1] or "").strip(),
-                "deskripsi_barang": str(row[2] or "").strip(),
-                "unit": str(row[3] or "").strip(),
-                "biaya_barang": biaya_barang,
-                "biaya_standar_terakhir": biaya_standar_terakhir,
-                "no_standar_terakhir": no_standar_terakhir,
-                "biaya_standar_baru": float(row[7] or 0),
-            })
+        data = [{
+            "detail_id": int(row[0] or 0),
+            "no_barang": str(row[1] or "").strip(),
+            "deskripsi_barang": str(row[2] or "").strip(),
+            "unit": str(row[3] or "").strip(),
+            "biaya_barang": float(row[4] or 0),
+            "biaya_standar_terakhir": float(row[5] or 0),
+            "no_standar_terakhir": str(row[6] or "").strip(),
+            "biaya_standar_baru": float(row[7] or 0),
+        } for row in cur.fetchall()]
         con.close()
         return jsonify({"data": data, "total": len(data)})
     except Exception as e:
@@ -6792,28 +8403,20 @@ def api_standarisasi_harga_details(standar_id):
         return jsonify({"data": [], "total": 0, "error": str(e)}), 500
 
 
-def _monitoring_formula_where_clause(search="", date_from="", date_to="", wodet_id="", no_spk=""):
+def _monitoring_formula_where_clause(search="", date_from="", date_to="", wodet_id=""):
     conditions = ["1=1"]
     params = []
 
-    if no_spk:
-        conditions.append("w.WONO = ?")
-        params.append(no_spk)
-
     if search:
-        if search.upper().startswith("GTE-SPK-"):
-            conditions.append("w.WONO = ?")
-            params.append(search.strip())
-        else:
-            conditions.append("""(
-                LOWER(w.WONO) CONTAINING LOWER(?)
-                OR LOWER(det.ITEMNO) CONTAINING LOWER(?)
-                OR LOWER(det.JOBDESCRIPTION) CONTAINING LOWER(?)
-                OR LOWER(i.ITEMDESCRIPTION) CONTAINING LOWER(?)
-                OR LOWER(so.SONO) CONTAINING LOWER(?)
-                OR LOWER(so.PONO) CONTAINING LOWER(?)
-            )""")
-            params += [search] * 6
+        conditions.append("""(
+            LOWER(w.WONO) CONTAINING LOWER(?)
+            OR LOWER(det.ITEMNO) CONTAINING LOWER(?)
+            OR LOWER(det.JOBDESCRIPTION) CONTAINING LOWER(?)
+            OR LOWER(i.ITEMDESCRIPTION) CONTAINING LOWER(?)
+            OR LOWER(so.SONO) CONTAINING LOWER(?)
+            OR LOWER(so.PONO) CONTAINING LOWER(?)
+        )""")
+        params += [search] * 6
 
     if date_from:
         conditions.append("w.WODATE >= ?")
@@ -7696,7 +9299,6 @@ def api_monitoring_formula():
         return jsonify({"message": "Akses ditolak"}), 403
     try:
         search = request.args.get("search", "")
-        no_spk_filter = request.args.get("no_spk", "").strip()
         date_from = request.args.get("date_from", "")
         date_to = request.args.get("date_to", "")
         status = request.args.get("status", "").strip()
@@ -7712,7 +9314,7 @@ def api_monitoring_formula():
 
         con = fdb.connect(**DB_CONFIG)
         cur = con.cursor()
-        where_sql, params_where = _monitoring_formula_where_clause(search, date_from, date_to, wodet_id_filter, no_spk_filter)
+        where_sql, params_where = _monitoring_formula_where_clause(search, date_from, date_to, wodet_id_filter)
         wodet_columns = set(_get_table_columns(cur, "WODET"))
         def _truthy_sql_expr(alias, column):
             return f"UPPER(TRIM(CAST({alias}.{column} AS VARCHAR(20)))) NOT IN ('', '0', 'N', 'NO', 'F', 'FALSE')"
@@ -8151,165 +9753,6 @@ def api_monitoring_formula():
         return jsonify({"data": [], "total": 0, "error": str(e)}), 500
 
 
-@app.route("/api/spk-simple")
-@jwt_required()
-def api_spk_simple():
-    if not check_permission("spk"):
-        return jsonify({"message": "Akses ditolak"}), 403
-    try:
-        search    = request.args.get("search", "")
-        date_from = request.args.get("date_from", "")
-        date_to   = request.args.get("date_to", "")
-        status    = request.args.get("status", "")
-        offset    = int(request.args.get("offset", 0))
-        limit     = int(request.args.get("limit", 50))
-
-        con = fdb.connect(**DB_CONFIG)
-        cur = con.cursor()
-
-        conditions   = ["1=1"]
-        params_where = []
-
-        if search:
-            # We don't use CONTAINING for exact match SPK lookups since it scans the whole DB
-            if search.upper().startswith("GTE-SPK-"):
-                conditions.append("w.WONO = ?")
-                params_where.append(search.strip())
-            else:
-                keyword = search.lower().strip()
-                conditions.append("""(
-                    LOWER(w.WONO)               CONTAINING ?
-                    OR LOWER(w.DESCRIPTION)     CONTAINING ?
-                    OR LOWER(det.ITEMNO)        CONTAINING ?
-                    OR LOWER(det.JOBDESCRIPTION) CONTAINING ?
-                )""")
-                params_where += [keyword] * 4
-
-        if date_from:
-            conditions.append("w.WODATE >= ?")
-            params_where.append(date_from)
-
-        if date_to:
-            conditions.append("w.WODATE <= ?")
-            params_where.append(date_to)
-
-        status_condition = _spk_item_status_condition(status)
-        if status_condition:
-            conditions.append(status_condition)
-
-        where_sql = " AND ".join(conditions)
-
-        cur.execute(f"""
-            SELECT COUNT(det.ID)
-            FROM WO w
-            JOIN WODET det ON det.WOID  = w.ID
-            WHERE {where_sql}
-        """, params_where)
-        total_rows = int(cur.fetchone()[0] or 0)
-
-        cur.execute(f"""
-            WITH
-            page_rows AS (
-                SELECT FIRST ? SKIP ?
-                    det.ID AS WODET_ID,
-                    w.WONO,
-                    w.WODATE,
-                    w.EXPECTEDDATE,
-                    w.DESCRIPTION,
-                    det.ITEMNO,
-                    det.JOBDESCRIPTION,
-                    det.QUANTITY,
-                    det.UNIT,
-                    det.STATUS,
-                    i.ITEMDESCRIPTION,
-                    i.TIPEPERSEDIAAN,
-                    so.SONO,
-                    so.PONO,
-                    det.NOJOB
-                FROM WO w
-                JOIN WODET det ON det.WOID  = w.ID
-                LEFT JOIN SO so     ON so.SOID   = det.SOID
-                LEFT JOIN ITEM i    ON i.ITEMNO  = det.ITEMNO
-                WHERE {where_sql}
-                ORDER BY w.WODATE DESC, w.WONO, det.NOJOB
-            )
-            SELECT
-                p.WODET_ID,
-                p.WONO,
-                p.WODATE,
-                p.EXPECTEDDATE,
-                p.DESCRIPTION,
-                p.ITEMNO,
-                p.JOBDESCRIPTION,
-                p.QUANTITY,
-                p.UNIT,
-                p.STATUS,
-                p.ITEMDESCRIPTION,
-                p.TIPEPERSEDIAAN,
-                p.SONO,
-                p.PONO,
-                p.NOJOB,
-                (SELECT MAX(pr.RESULTDATE) FROM PRODRESULTDET prd JOIN PRODRESULT pr ON pr.ID = prd.PRODRESULTID WHERE prd.WODETID = p.WODET_ID) AS TGL_SELESAI,
-                (SELECT SUM(COALESCE(prd.QUANTITY, 0)) FROM PRODRESULTDET prd WHERE prd.WODETID = p.WODET_ID) AS TOTAL_QTY_HASIL,
-                (SELECT SUM(wdm.QUANTITY) FROM WODETMAT wdm WHERE wdm.WODETID = p.WODET_ID) AS TOTAL_MAT_PLAN,
-                (SELECT SUM(COALESCE(wdm.QTYTAKEN, 0)) FROM WODETMAT wdm WHERE wdm.WODETID = p.WODET_ID) AS TOTAL_QTYTAKEN,
-                COALESCE(
-                    (SELECT SUM(md.QUANTITY) FROM MATRLSDET md JOIN WODETMAT wdm ON wdm.ID = md.WODETID WHERE wdm.WODETID = p.WODET_ID),
-                    (SELECT SUM(md.QUANTITY) FROM MATRLSDET md WHERE md.WODETID = p.WODET_ID),
-                    0
-                ) AS TOTAL_MAT_KELUAR
-            FROM page_rows p
-        """, [limit, offset] + params_where)
-
-        rows = cur.fetchall()
-        con.close()
-
-        data = []
-        for r in rows:
-            qty_spk = float(r[7] or 0)
-            total_qty_hasil = float(r[16] or 0)
-            total_mat_plan = float(r[17] or 0)
-            total_qtytaken = float(r[18] or 0)
-            total_keluar   = float(r[19] or 0)
-            total_processed = max(total_qtytaken, total_keluar)
-            material_progress = round(min((total_processed / total_mat_plan) * 100, 100.0), 1) if total_mat_plan > 0 else 0.0
-            is_production_done = qty_spk <= 0 or total_qty_hasil + 0.0001 >= qty_spk
-            tgl_selesai = str(r[15]) if r[15] and is_production_done else ""
-
-            production_status = "Batal" if r[9] == 5 else ("Selesai" if is_production_done else "Proses")
-    
-            data.append({
-                "wodet_id": r[0],
-                "no_spk": r[1],
-                "tanggal": str(r[2]),
-                "estimasi": str(r[3]) if r[3] else "",
-                "tgl_selesai": tgl_selesai,
-                "deskripsi": str(r[4] or ""),
-                "no_barang": str(r[5] or ""),
-                "nama_barang": str(r[10] or ""),
-                "job_desc": str(r[6] or ""),
-                "qty": qty_spk,
-                "uom": str(r[8] or ""),
-                "status_barang": r[9],
-                "tipe_persediaan": r[11],
-                "no_pesanan": str(r[12] or ""),
-                "no_po": str(r[13] or ""),
-                "total_mat_plan": total_mat_plan,
-                "total_mat_keluar": total_processed,
-                "material_progress": material_progress,
-                "production_status": production_status,
-                "qty_hasil_produksi": total_qty_hasil
-            })
-
-        return jsonify({
-            "data": filter_record_columns("spk-simple", data),
-            "total": total_rows,
-        })
-    except Exception as e:
-        print(f"Error api_spk_simple: {e}")
-        return jsonify({"message": str(e)}), 500
-
-
 @app.route("/api/spk")
 @jwt_required()
 def api_spk():
@@ -8330,19 +9773,16 @@ def api_spk():
         params_where = []
 
         if search:
-            # We don't use CONTAINING for exact match SPK lookups since it scans the whole DB
-            if search.upper().startswith("GTE-SPK-"):
-                conditions.append("w.WONO = ?")
-                params_where.append(search.strip())
-            else:
-                keyword = search.lower().strip()
-                conditions.append("""(
-                    LOWER(w.WONO)               CONTAINING ?
-                    OR LOWER(w.DESCRIPTION)     CONTAINING ?
-                    OR LOWER(det.ITEMNO)        CONTAINING ?
-                    OR LOWER(det.JOBDESCRIPTION) CONTAINING ?
-                )""")
-                params_where += [keyword] * 4
+            conditions.append("""(
+                LOWER(w.WONO)               CONTAINING LOWER(?)
+                OR LOWER(w.DESCRIPTION)     CONTAINING LOWER(?)
+                OR LOWER(det.ITEMNO)        CONTAINING LOWER(?)
+                OR LOWER(det.JOBDESCRIPTION) CONTAINING LOWER(?)
+                OR LOWER(i.ITEMDESCRIPTION) CONTAINING LOWER(?)
+                OR LOWER(so.SONO)           CONTAINING LOWER(?)
+                OR LOWER(so.PONO)           CONTAINING LOWER(?)
+            )""")
+            params_where += [search] * 7
 
         if date_from:
             conditions.append("w.WODATE >= ?")
@@ -8641,19 +10081,16 @@ def api_spk_export():
         conditions = ["1=1"]
         params_where = []
         if search:
-            # We don't use CONTAINING for exact match SPK lookups since it scans the whole DB
-            if search.upper().startswith("GTE-SPK-"):
-                conditions.append("w.WONO = ?")
-                params_where.append(search.strip())
-            else:
-                keyword = search.lower().strip()
-                conditions.append("""(
-                    LOWER(w.WONO)               CONTAINING ?
-                    OR LOWER(w.DESCRIPTION)     CONTAINING ?
-                    OR LOWER(det.ITEMNO)        CONTAINING ?
-                    OR LOWER(det.JOBDESCRIPTION) CONTAINING ?
-                )""")
-                params_where += [keyword] * 4
+            conditions.append("""(
+                LOWER(w.WONO)               CONTAINING LOWER(?)
+                OR LOWER(w.DESCRIPTION)     CONTAINING LOWER(?)
+                OR LOWER(det.ITEMNO)        CONTAINING LOWER(?)
+                OR LOWER(det.JOBDESCRIPTION) CONTAINING LOWER(?)
+                OR LOWER(i.ITEMDESCRIPTION) CONTAINING LOWER(?)
+                OR LOWER(so.SONO)           CONTAINING LOWER(?)
+                OR LOWER(so.PONO)           CONTAINING LOWER(?)
+            )""")
+            params_where += [search] * 7
         if date_from:
             conditions.append("w.WODATE >= ?")
             params_where.append(date_from)
@@ -9285,7 +10722,7 @@ def _build_hpp_rows(cur, date_from="", date_to="", search=""):
             SUM(
                 COALESCE(det.QUANTITY, 0)
                 * COALESCE(det.UNITPRICE, 0)
-                * (1 - COALESCE(CAST(det.ITEMDISCPC AS DOUBLE PRECISION), 0) / 100)
+                * (1 - COALESCE(CAST(NULLIF(TRIM(det.ITEMDISCPC), '') AS DOUBLE PRECISION), 0) / 100)
             )
         FROM ARINV ar
         LEFT JOIN ARINVDET det ON det.ARINVOICEID = ar.ARINVOICEID
@@ -9334,7 +10771,7 @@ def _build_hpp_rows(cur, date_from="", date_to="", search=""):
             SUM(
                 COALESCE(NULLIF(det.QTYSHIPPED, 0), det.QUANTITY, 0)
                 * COALESCE(det.UNITPRICE, 0)
-                * (1 - COALESCE(CAST(det.DISCPC AS DOUBLE PRECISION), 0) / 100)
+                * (1 - COALESCE(CAST(NULLIF(TRIM(det.DISCPC), '') AS DOUBLE PRECISION), 0) / 100)
             )
         FROM SO so
         LEFT JOIN SODET det ON det.SOID = so.SOID
@@ -9623,7 +11060,7 @@ def _build_hpp_trend_rows(cur, date_from="", date_to=""):
                 SUM(
                     COALESCE(det.QUANTITY, 0)
                     * COALESCE(det.UNITPRICE, 0)
-                    * (1 - COALESCE(CAST(det.ITEMDISCPC AS DOUBLE PRECISION), 0) / 100)
+                    * (1 - COALESCE(CAST(NULLIF(TRIM(det.ITEMDISCPC), '') AS DOUBLE PRECISION), 0) / 100)
                 )
             FROM ARINV ar
             LEFT JOIN ARINVDET det ON det.ARINVOICEID = ar.ARINVOICEID
@@ -9651,7 +11088,7 @@ def _build_hpp_trend_rows(cur, date_from="", date_to=""):
                 SUM(
                     COALESCE(NULLIF(det.QTYSHIPPED, 0), det.QUANTITY, 0)
                     * COALESCE(det.UNITPRICE, 0)
-                    * (1 - COALESCE(CAST(det.DISCPC AS DOUBLE PRECISION), 0) / 100)
+                    * (1 - COALESCE(CAST(NULLIF(TRIM(det.DISCPC), '') AS DOUBLE PRECISION), 0) / 100)
                 )
             FROM SO so
             LEFT JOIN SODET det ON det.SOID = so.SOID
@@ -9862,7 +11299,7 @@ def _build_hpp_sales_details(cur, item_no, date_from="", date_to=""):
         SELECT
             ar.INVOICENO, ar.INVOICEDATE, pd.PERSONNO, pd.NAME,
             ar.PURCHASEORDERNO, det.QUANTITY, det.ITEMUNIT, det.UNITPRICE,
-            COALESCE(CAST(det.ITEMDISCPC AS DOUBLE PRECISION), 0)
+            COALESCE(CAST(NULLIF(TRIM(det.ITEMDISCPC), '') AS DOUBLE PRECISION), 0)
         FROM ARINV ar
         LEFT JOIN PERSONDATA pd ON pd.ID = ar.CUSTOMERID
         LEFT JOIN ARINVDET det ON det.ARINVOICEID = ar.ARINVOICEID
@@ -9887,7 +11324,7 @@ def _build_hpp_sales_details(cur, item_no, date_from="", date_to=""):
             so.SONO, so.SODATE, pd.PERSONNO, pd.NAME, so.PONO,
             COALESCE(NULLIF(det.QTYSHIPPED, 0), det.QUANTITY, 0),
             det.ITEMUNIT, det.UNITPRICE,
-            COALESCE(CAST(det.DISCPC AS DOUBLE PRECISION), 0)
+            COALESCE(CAST(NULLIF(TRIM(det.DISCPC), '') AS DOUBLE PRECISION), 0)
         FROM SO so
         LEFT JOIN PERSONDATA pd ON pd.ID = so.CUSTOMERID
         LEFT JOIN SODET det ON det.SOID = so.SOID
@@ -9903,8 +11340,7 @@ def api_hpp_details():
     if not check_permission("akuntansi"):
         return jsonify({"message": "Akses ditolak"}), 403
     try:
-        search = request.args.get("search", "")
-        no_spk_filter = request.args.get("no_spk", "").strip()
+        item_no = request.args.get("itemno", "")
         date_from = request.args.get("date_from", "")
         date_to = request.args.get("date_to", "")
         if not item_no:
@@ -9918,6 +11354,483 @@ def api_hpp_details():
     except Exception as e:
         print(f"Error api_hpp_details: {e}")
         return jsonify({"data": [], "error": str(e)})
+
+
+def _profit_loss_where(search, date_from, date_to):
+    conditions = [
+        "inv.GETFROMDO = 1",
+        "inv.INVOICETYPE = 1",
+        "(inv.ISDP IS NULL OR inv.ISDP = 0)",
+        "do1.DELIVERYORDER = 1",
+        "do1.INVOICETYPE = 1",
+        "det.ITEMNO IS NOT NULL",
+    ]
+    params = []
+
+    if date_from:
+        conditions.append("inv.INVOICEDATE >= ?")
+        params.append(date_from)
+    if date_to:
+        conditions.append("inv.INVOICEDATE <= ?")
+        params.append(date_to)
+    if search:
+        conditions.append("""(
+            LOWER(inv.INVOICENO) CONTAINING LOWER(?)
+            OR LOWER(do1.INVOICENO) CONTAINING LOWER(?)
+            OR LOWER(so.SONO) CONTAINING LOWER(?)
+            OR LOWER(det.ITEMNO) CONTAINING LOWER(?)
+            OR LOWER(COALESCE(det.ITEMOVDESC, i.ITEMDESCRIPTION)) CONTAINING LOWER(?)
+            OR LOWER(inv.PURCHASEORDERNO) CONTAINING LOWER(?)
+            OR LOWER(pd.NAME) CONTAINING LOWER(?)
+        )""")
+        params += [search] * 7
+
+    return " AND ".join(conditions), params
+
+
+_PROFIT_LOSS_FROM = """
+    FROM ARINV inv
+    JOIN ARINVDET det ON det.USEDINSIID = inv.ARINVOICEID
+    JOIN ARINV do1 ON do1.ARINVOICEID = det.ARINVOICEID
+    LEFT JOIN PERSONDATA pd ON pd.ID = inv.CUSTOMERID
+    LEFT JOIN SO so ON so.SOID = det.SOID
+    LEFT JOIN ITEM i ON i.ITEMNO = det.ITEMNO
+    LEFT JOIN ITEMHIST h ON h.ITEMHISTID = det.ITEMHISTID
+"""
+
+_PROFIT_LOSS_SELECT = """
+    inv.INVOICENO,
+    do1.INVOICENO,
+    so.SONO,
+    COALESCE(NULLIF(TRIM(so.PONO), ''), inv.PURCHASEORDERNO),
+    inv.INVOICEDATE,
+    det.ITEMNO,
+    det.QUANTITY,
+    det.ITEMUNIT,
+    det.UNITPRICE,
+    COALESCE(CAST(NULLIF(TRIM(det.ITEMDISCPC), '') AS DOUBLE PRECISION), 0),
+    h.QUANTITY,
+    COALESCE(NULLIF(h.COST, 0), NULLIF(h.NEWCOST, 0), 0),
+    det.SEQ,
+    det.ITEMHISTID,
+    h.TXDATE,
+    pd.NAME,
+    COALESCE(NULLIF(TRIM(det.ITEMOVDESC), ''), i.ITEMDESCRIPTION)
+"""
+
+
+def _ensure_profit_loss_remarks_table():
+    con = connect_dashboard_db()
+    cur = con.cursor()
+    if DASHBOARD_DB_KIND == "postgres":
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS profit_loss_remarks (
+                row_key TEXT PRIMARY KEY,
+                remarks TEXT NOT NULL DEFAULT '',
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_by TEXT
+            )
+        """)
+    else:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS profit_loss_remarks (
+                row_key TEXT PRIMARY KEY,
+                remarks TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_by TEXT
+            )
+        """)
+    con.commit()
+    con.close()
+
+
+def _get_profit_loss_remarks(row_keys):
+    keys = sorted({str(key or "").strip() for key in row_keys if str(key or "").strip()})
+    if not keys:
+        return {}
+    _ensure_profit_loss_remarks_table()
+    con = connect_dashboard_db()
+    cur = con.cursor()
+    result = {}
+    for start in range(0, len(keys), 500):
+        chunk = keys[start:start + 500]
+        placeholders = ",".join("?" for _ in chunk)
+        cur.execute(f"""
+            SELECT row_key, remarks
+            FROM profit_loss_remarks
+            WHERE row_key IN ({placeholders})
+        """, chunk)
+        result.update({row[0]: row[1] for row in cur.fetchall()})
+    con.close()
+    return result
+
+
+def _save_profit_loss_remark(row_key, remarks, username=""):
+    row_key = str(row_key or "").strip()
+    if not row_key:
+        return False
+    _ensure_profit_loss_remarks_table()
+    con = connect_dashboard_db()
+    cur = con.cursor()
+    if DASHBOARD_DB_KIND == "postgres":
+        cur.execute("""
+            INSERT INTO profit_loss_remarks (row_key, remarks, updated_at, updated_by)
+            VALUES (?, ?, CURRENT_TIMESTAMP, ?)
+            ON CONFLICT (row_key) DO UPDATE SET
+                remarks = EXCLUDED.remarks,
+                updated_at = CURRENT_TIMESTAMP,
+                updated_by = EXCLUDED.updated_by
+        """, (row_key, remarks or "", username or ""))
+    else:
+        cur.execute("""
+            INSERT INTO profit_loss_remarks (row_key, remarks, updated_at, updated_by)
+            VALUES (?, ?, CURRENT_TIMESTAMP, ?)
+            ON CONFLICT(row_key) DO UPDATE SET
+                remarks = excluded.remarks,
+                updated_at = CURRENT_TIMESTAMP,
+                updated_by = excluded.updated_by
+        """, (row_key, remarks or "", username or ""))
+    con.commit()
+    con.close()
+    return True
+
+
+def _build_hpp_production_ref_map(cur, item_nos, date_to=""):
+    refs = {}
+    items = sorted({str(item or "").strip() for item in item_nos if str(item or "").strip()})
+    if not items:
+        return refs
+    for start in range(0, len(items), 300):
+        chunk = items[start:start + 300]
+        placeholders = ",".join("?" for _ in chunk)
+        params = list(chunk)
+        date_filter = ""
+        if date_to:
+            date_filter = "AND pr.RESULTDATE <= ?"
+            params.append(date_to)
+        cur.execute(f"""
+            SELECT prd.ITEMNO, pr.RESULTNO, pr.RESULTDATE
+            FROM PRODRESULT pr
+            LEFT JOIN PRODRESULTDET prd ON prd.PRODRESULTID = pr.ID
+            WHERE prd.ITEMNO IN ({placeholders})
+              {date_filter}
+            ORDER BY prd.ITEMNO, pr.RESULTDATE DESC, pr.RESULTNO DESC
+        """, params)
+        for item_no, result_no, _result_date in cur.fetchall():
+            item_key = str(item_no or "").strip()
+            if item_key and item_key not in refs:
+                refs[item_key] = f"Produksi / GP {str(result_no or '').strip()}"
+    return refs
+
+
+def _profit_loss_extract_spk(description):
+    match = re.search(r"\bSPK\s*:\s*([A-Z0-9][A-Z0-9\-\/.]*)", str(description or ""), re.IGNORECASE)
+    return match.group(1).strip() if match else ""
+
+
+def _profit_loss_fifo_ref_type(result_no="", adj_no="", penerimaan_no="", tx_type=""):
+    if result_no:
+        return "GP"
+    if adj_no:
+        return "ADJ"
+    if penerimaan_no:
+        return "Penerimaan"
+    return str(tx_type or "FIFO").strip() or "FIFO"
+
+
+def _build_fifo_hpp_detail_map(cur, fifo_rows):
+    details_by_out_hist = {}
+    itemhist_ids = sorted({
+        str(row.get("itemhist_id") or "").strip()
+        for row in fifo_rows
+        if str(row.get("itemhist_id") or "").strip()
+    })
+    if not itemhist_ids:
+        return details_by_out_hist
+
+    for start in range(0, len(itemhist_ids), 300):
+        chunk = itemhist_ids[start:start + 300]
+        placeholders = ",".join("?" for _ in chunk)
+        try:
+            cur.execute(f"""
+                SELECT
+                    d.ITEMHISTID,
+                    d.FID,
+                    d.QUANTITY,
+                    in_h.TXDATE,
+                    in_h.TXTYPE,
+                    COALESCE(in_h.COST, 0),
+                    in_h.DESCRIPTION,
+                    pr.RESULTNO,
+                    ia.ADJNO,
+                    ai.INVOICENO
+                FROM ITEMHIST_DETAIL2 d
+                JOIN ITEMHIST in_h ON in_h.ITEMHISTID = d.FID
+                LEFT JOIN PRODRESULTDET prd ON prd.ITEMHISTID = in_h.ITEMHISTID
+                LEFT JOIN PRODRESULT pr ON pr.ID = prd.PRODRESULTID
+                LEFT JOIN ITADJDET iad ON iad.ITEMHISTID = in_h.ITEMHISTID
+                LEFT JOIN ITEMADJ ia ON ia.ITEMADJID = iad.ITEMADJID
+                LEFT JOIN APITMDET apd ON apd.ITEMHISTID = in_h.ITEMHISTID
+                LEFT JOIN APINV ai ON ai.APINVOICEID = apd.APINVOICEID
+                WHERE d.ITEMHISTID IN ({placeholders})
+                ORDER BY d.ITEMHISTID, in_h.TXDATE, d.FID
+            """, chunk)
+            for (
+                out_hist_id, source_hist_id, fifo_qty, txdate, tx_type, unit_cost,
+                description, result_no, adj_no, penerimaan_no,
+            ) in cur.fetchall():
+                out_key = str(out_hist_id or "").strip()
+                result_no = str(result_no or "").strip()
+                adj_no = str(adj_no or "").strip()
+                penerimaan_no = str(penerimaan_no or "").strip()
+                ref_no = result_no or adj_no or penerimaan_no or "FIFO"
+                ref_type = _profit_loss_fifo_ref_type(result_no, adj_no, penerimaan_no, tx_type)
+                qty = float(fifo_qty or 0)
+                cost = float(unit_cost or 0)
+                details_by_out_hist.setdefault(out_key, []).append({
+                    "source_itemhist_id": str(source_hist_id or "").strip(),
+                    "tanggal": str(txdate) if txdate else "",
+                    "ref_type": ref_type,
+                    "ref_no": ref_no,
+                    "no_spk": _profit_loss_extract_spk(description),
+                    "qty": round(qty, 4),
+                    "hpp_satuan": round(cost, 4),
+                    "hpp_total": round(qty * cost, 2),
+                })
+        except Exception as detail_error:
+            print(f"Error resolve fifo hpp detail: {detail_error}")
+
+    summary = {}
+    for out_key, details in details_by_out_hist.items():
+        seen_refs = []
+        seen_spks = []
+        unique_details = []
+        seen_detail_keys = set()
+        for detail in details:
+            detail_key = (
+                detail.get("source_itemhist_id"),
+                detail.get("ref_no"),
+                detail.get("qty"),
+                detail.get("hpp_total"),
+            )
+            if detail_key in seen_detail_keys:
+                continue
+            seen_detail_keys.add(detail_key)
+            unique_details.append(detail)
+            ref_no = str(detail.get("ref_no") or "").strip()
+            spk_no = str(detail.get("no_spk") or "").strip()
+            if ref_no and ref_no != "FIFO" and ref_no not in seen_refs:
+                seen_refs.append(ref_no)
+            if spk_no and spk_no not in seen_spks:
+                seen_spks.append(spk_no)
+        summary[out_key] = {
+            "reff_hpp": seen_refs[0] if len(seen_refs) == 1 else "FIFO",
+            "no_spk": ", ".join(seen_spks),
+            "fifo_details": unique_details,
+        }
+    return summary
+
+
+def _build_profit_loss_rows(rows, hpp_unit_by_item=None, production_ref_by_item=None, remarks_by_key=None, fifo_detail_by_itemhist=None):
+    hpp_unit_by_item = hpp_unit_by_item or {}
+    production_ref_by_item = production_ref_by_item or {}
+    remarks_by_key = remarks_by_key or {}
+    fifo_detail_by_itemhist = fifo_detail_by_itemhist or {}
+    data = []
+    for row in rows:
+        item_no = str(row[5] or "").strip()
+        qty = float(row[6] or 0)
+        harga_satuan = float(row[8] or 0)
+        disc_pct = float(row[9] or 0)
+        hist_qty = abs(float(row[10] or 0))
+        hist_cost = float(row[11] or 0)
+        seq = str(row[12] or "").strip()
+        itemhist_id = str(row[13] or "").strip()
+        row_key = "|".join([
+            str(row[0] or "").strip(),
+            str(row[1] or "").strip(),
+            seq,
+            itemhist_id,
+            item_no,
+        ])
+        jumlah = qty * harga_satuan * (1 - disc_pct / 100)
+        if hist_cost and hist_qty and abs(hist_qty - abs(qty)) > 0.0001:
+            hpp = hist_cost * (abs(qty) / hist_qty)
+            fifo_info = fifo_detail_by_itemhist.get(itemhist_id, {})
+            reff_hpp = fifo_info.get("reff_hpp") or "FIFO"
+        elif hist_cost:
+            hpp = hist_cost
+            fifo_info = fifo_detail_by_itemhist.get(itemhist_id, {})
+            reff_hpp = fifo_info.get("reff_hpp") or "FIFO"
+        else:
+            hpp = qty * float(hpp_unit_by_item.get(item_no, 0) or 0)
+            reff_hpp = production_ref_by_item.get(item_no) or "Produksi"
+            fifo_info = {}
+        laba_rugi = jumlah - hpp
+        persen = (laba_rugi / jumlah * 100) if jumlah else 0
+
+        data.append({
+            "row_key": row_key,
+            "customer": str(row[15] or "").strip(),
+            "no_faktur": str(row[0] or "").strip(),
+            "no_do": str(row[1] or "").strip(),
+            "no_so": str(row[2] or "").strip(),
+            "no_po": str(row[3] or "").strip(),
+            "tgl_faktur": str(row[4]) if row[4] else "",
+            "no_barang": item_no,
+            "deskripsi_barang": str(row[16] or "").strip(),
+            "qty": round(qty, 4),
+            "satuan": str(row[7] or "").strip(),
+            "harga_satuan": round(harga_satuan, 2),
+            "jumlah": round(jumlah, 2),
+            "hpp": round(hpp, 2),
+            "laba_rugi": round(laba_rugi, 2),
+            "persen": round(persen, 2),
+            "reff_hpp": reff_hpp,
+            "no_spk": fifo_info.get("no_spk") or "",
+            "fifo_details": fifo_info.get("fifo_details") or [],
+            "remarks": remarks_by_key.get(row_key, ""),
+        })
+    return data
+
+
+def _profit_loss_summary(rows):
+    total_jumlah = round(sum(float(row.get("jumlah") or 0) for row in rows), 2)
+    total_hpp = round(sum(float(row.get("hpp") or 0) for row in rows), 2)
+    laba_rugi = round(total_jumlah - total_hpp, 2)
+    return {
+        "total_rows": len(rows),
+        "total_qty": round(sum(float(row.get("qty") or 0) for row in rows), 4),
+        "total_jumlah": total_jumlah,
+        "total_hpp": total_hpp,
+        "laba_rugi": laba_rugi,
+        "margin_pct": round((laba_rugi / total_jumlah * 100) if total_jumlah else 0, 2),
+    }
+
+
+def _filter_profit_loss_margin(rows, margin_filter=""):
+    if margin_filter == "negative":
+        return [row for row in rows if float(row.get("persen") or 0) < 0]
+    if margin_filter == "positive":
+        return [row for row in rows if float(row.get("persen") or 0) > 0]
+    return rows
+
+
+def _fetch_profit_loss_rows(cur, search="", date_from="", date_to="", offset=0, limit=None, margin_filter=""):
+    where_sql, params = _profit_loss_where(search, date_from, date_to)
+    hpp_unit_by_item = _build_hpp_unit_map(cur, date_to)
+    production_ref_by_item = {}
+    paging_sql = ""
+    paging_params = []
+    if limit is not None:
+        paging_sql = "FIRST ? SKIP ?"
+        paging_params = [limit, offset]
+
+    cur.execute(f"""
+        SELECT {paging_sql}
+            {_PROFIT_LOSS_SELECT}
+            {_PROFIT_LOSS_FROM}
+        WHERE {where_sql}
+        ORDER BY inv.INVOICEDATE DESC, inv.INVOICENO, do1.INVOICENO, det.SEQ
+    """, paging_params + params)
+    raw_rows = cur.fetchall()
+    production_ref_by_item = _build_hpp_production_ref_map(cur, [row[5] for row in raw_rows], date_to)
+    fifo_detail_by_itemhist = _build_fifo_hpp_detail_map(cur, [
+        {
+            "itemhist_id": row[13],
+            "item_no": row[5],
+            "hist_cost": row[11],
+            "txdate": row[14],
+        }
+        for row in raw_rows
+        if row[13] and row[11]
+    ])
+    preview_rows = _build_profit_loss_rows(raw_rows, hpp_unit_by_item, production_ref_by_item, {}, fifo_detail_by_itemhist)
+    remarks_by_key = _get_profit_loss_remarks([row["row_key"] for row in preview_rows])
+    rows = _build_profit_loss_rows(raw_rows, hpp_unit_by_item, production_ref_by_item, remarks_by_key, fifo_detail_by_itemhist)
+    return _filter_profit_loss_margin(rows, margin_filter)
+
+
+@app.route("/api/profit-loss")
+@jwt_required()
+def api_profit_loss():
+    if not check_permission("akuntansi"):
+        return jsonify({"message": "Akses ditolak"}), 403
+    try:
+        search = request.args.get("search", "")
+        date_from = request.args.get("date_from", "")
+        date_to = request.args.get("date_to", "")
+        margin_filter = request.args.get("margin_filter", "")
+        offset = int(request.args.get("offset", 0))
+        limit = int(request.args.get("limit", 50))
+
+        con = connect_easy_db()
+        cur = con.cursor()
+
+        all_rows = _fetch_profit_loss_rows(cur, search, date_from, date_to, margin_filter=margin_filter)
+        page_rows = all_rows[offset:offset + limit]
+        con.close()
+
+        return jsonify({
+            "data": filter_record_columns("profit_loss", page_rows),
+            "total": len(all_rows),
+            "summary": _profit_loss_summary(all_rows),
+        })
+    except Exception as e:
+        print(f"Error api_profit_loss: {e}")
+        return jsonify({"data": [], "total": 0, "summary": {}, "error": str(e)})
+
+
+@app.route("/api/profit-loss/export")
+@jwt_required()
+def api_profit_loss_export():
+    if not check_permission("akuntansi"):
+        return jsonify({"message": "Akses ditolak"}), 403
+    try:
+        search = request.args.get("search", "")
+        date_from = request.args.get("date_from", "")
+        date_to = request.args.get("date_to", "")
+        margin_filter = request.args.get("margin_filter", "")
+
+        con = connect_easy_db()
+        cur = con.cursor()
+        rows = _fetch_profit_loss_rows(cur, search, date_from, date_to, margin_filter=margin_filter)
+        con.close()
+
+        return jsonify({
+            "data": filter_record_columns("profit_loss", rows),
+            "total_rows": len(rows),
+            "summary": _profit_loss_summary(rows),
+        })
+    except Exception as e:
+        print(f"Error api_profit_loss_export: {e}")
+        return jsonify({"data": [], "total_rows": 0, "summary": {}, "error": str(e)})
+
+
+@app.route("/api/profit-loss/remarks", methods=["POST"])
+@jwt_required()
+def api_profit_loss_remarks():
+    if not check_permission("akuntansi"):
+        return jsonify({"message": "Akses ditolak"}), 403
+    try:
+        payload = request.get_json(silent=True) or {}
+        row_key = payload.get("row_key", "")
+        remarks = payload.get("remarks", "")
+        username = get_current_user().get("username", "")
+        if not str(row_key or "").strip():
+            return jsonify({"message": "row_key wajib diisi"}), 400
+        _save_profit_loss_remark(row_key, remarks, username)
+        log_activity(
+            username=username,
+            action="update",
+            module="profit_loss",
+            description="Update remarks Profit & Loss",
+            metadata={"row_key": row_key},
+        )
+        return jsonify({"message": "Remarks berhasil disimpan"})
+    except Exception as e:
+        print(f"Error api_profit_loss_remarks: {e}")
+        return jsonify({"message": "Gagal menyimpan remarks", "error": str(e)}), 500
 
 
 ASSET_TABLE_HINTS = ("ASSET", "AKTIVA", "FIX", "FA")
@@ -11880,15 +13793,16 @@ def background_sync():
         if current_data != last_data:
             socketio.emit("stock_update", current_data)
             last_data = current_data
-        time.sleep(3)
+        time.sleep(BACKGROUND_SYNC_INTERVAL)
 
 
 if __name__ == "__main__":
     init_db()
     init_baseline()
-    thread = threading.Thread(target=background_sync)
-    thread.daemon = True
-    thread.start()
+    if BACKGROUND_SYNC_ENABLED:
+        thread = threading.Thread(target=background_sync)
+        thread.daemon = True
+        thread.start()
     print(f"Server jalan di http://0.0.0.0:{BACKEND_PORT}")
     print(f"Akses dari jaringan lokal: http://<IP-komputer-ini>:{BACKEND_PORT}")
     socketio.run(app, host="0.0.0.0", debug=False, port=BACKEND_PORT, allow_unsafe_werkzeug=True)

@@ -28,9 +28,16 @@ const xmlCell = (row, column, header = false) => {
   if (header) {
     return `<Cell ss:StyleID="Header"><Data ss:Type="String">${escapeCell(column.label)}</Data></Cell>`
   }
+  const rawValue = row[column.key]
+  if (column.type === 'date') {
+    const dateValue = rawValue ? dayjs(rawValue) : null
+    if (!dateValue?.isValid()) return '<Cell ss:StyleID="Date"><Data ss:Type="String"></Data></Cell>'
+    return `<Cell ss:StyleID="Date"><Data ss:Type="DateTime">${dateValue.format('YYYY-MM-DD')}T00:00:00</Data></Cell>`
+  }
   const value = formatValue(row, column)
-  if (column.type === 'number') {
-    return `<Cell ss:StyleID="Number"><Data ss:Type="Number">${Number(value || 0)}</Data></Cell>`
+  if (column.type === 'number' || column.type === 'accounting' || column.type === 'general') {
+    const styleId = column.type === 'accounting' ? 'Accounting' : column.type === 'general' ? 'General' : 'Number'
+    return `<Cell ss:StyleID="${styleId}"><Data ss:Type="Number">${Number(value || 0)}</Data></Cell>`
   }
   return `<Cell ss:StyleID="Text"><Data ss:Type="String">${escapeCell(value)}</Data></Cell>`
 }
@@ -126,6 +133,16 @@ export function downloadWorkbookXLS(sheets, filename) {
         <Style ss:ID="Number">
           <Alignment ss:Horizontal="Right"/>
           <NumberFormat ss:Format="#,##0.00"/>
+        </Style>
+        <Style ss:ID="General">
+          <NumberFormat ss:Format="General"/>
+        </Style>
+        <Style ss:ID="Date">
+          <NumberFormat ss:Format="dd/mm/yyyy"/>
+        </Style>
+        <Style ss:ID="Accounting">
+          <Alignment ss:Horizontal="Right"/>
+          <NumberFormat ss:Format="_-[$Rp-421]* #,##0.00_-;[Red]-[$Rp-421]* #,##0.00_-;_-[$Rp-421]* &quot;-&quot;??_-;_-@_-"/>
         </Style>
       </Styles>
       ${worksheets}
