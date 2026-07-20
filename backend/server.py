@@ -239,7 +239,7 @@ MODULE_COLUMNS = {
         "no_barang", "deskripsi_barang", "kategori_barang",
         "satuan_1", "stok_satuan_1", "satuan_2", "stok_satuan_2",
         "satuan_3", "stok_satuan_3", "harga_fifo", "nilai_stock", "txdate",
-        "sumber_harga",
+        "last_stock_txdate", "sumber_harga",
     ],
     "monitoring_formula": [
         "wodet_id", "no_spk", "tanggal", "no_barang", "nama_barang", "qty_spk",
@@ -5936,6 +5936,27 @@ def _fifo_convert_stock(quantity, ratio):
     return qty / ratio_value
 
 
+def _fifo_date_filter_clause(date_from="", date_to=""):
+    conditions = []
+    params = []
+    if str(date_from or "").strip():
+        conditions.append("hd.TXDATE >= ?")
+        params.append(str(date_from).strip())
+    if str(date_to or "").strip():
+        conditions.append("hd.TXDATE <= ?")
+        params.append(str(date_to).strip())
+    if not conditions:
+        return "", []
+    return f"""
+          AND EXISTS (
+              SELECT 1
+              FROM ITEMHIST hd
+              WHERE hd.ITEMNO = i.ITEMNO
+                AND {' AND '.join(conditions)}
+          )
+    """, params
+
+
 def _fetch_fifo_cost_map(cur, item_nos):
     result = {}
     items = sorted({str(item or "").strip() for item in item_nos if str(item or "").strip()})
@@ -6028,6 +6049,7 @@ def _build_fifo_rows(rows, cost_by_item):
         stock_qty = float(row[4] or 0)
         ratio2 = float(row[7] or 0)
         ratio3 = float(row[8] or 0)
+        last_stock_txdate = row[9] if len(row) > 9 else None
         cost_info = cost_by_item.get(item_no, {})
         harga_fifo = float(cost_info.get("harga_fifo") or 0)
         nilai_stock = cost_info.get("nilai_stock")
@@ -6046,12 +6068,14 @@ def _build_fifo_rows(rows, cost_by_item):
             "harga_fifo": round(harga_fifo, 4),
             "nilai_stock": round(float(nilai_stock or 0), 2),
             "txdate": str(cost_info.get("txdate") or "").strip(),
+            "last_stock_txdate": last_stock_txdate.isoformat() if last_stock_txdate else "",
             "sumber_harga": str(cost_info.get("sumber_harga") or "").strip(),
         })
     return data
 
 
-def _get_fifo_summary_counts(cur):
+def _get_fifo_summary_counts(cur, date_from="", date_to=""):
+    date_sql, date_params = _fifo_date_filter_clause(date_from, date_to)
     cur.execute(f"""
         SELECT COALESCE(c.NAME, ''), COUNT(*)
         FROM ITEM i
@@ -6060,9 +6084,10 @@ def _get_fifo_summary_counts(cur):
           AND COALESCE(i.SUSPENDED, 0) = 0
           AND COALESCE(c.NAME, '') IN ({_build_in_clause(FIFO_CATEGORIES)})
           AND COALESCE((SELECT SUM(QUANTITY) FROM ITEMHIST h WHERE h.ITEMNO = i.ITEMNO), 0) > 0
+          {date_sql}
         GROUP BY c.NAME
         ORDER BY c.NAME
-    """, list(FIFO_CATEGORIES))
+    """, list(FIFO_CATEGORIES) + date_params)
     categories = [
         {"category": str(category or "").strip(), "count": int(count or 0)}
         for category, count in cur.fetchall()
@@ -6070,9 +6095,10 @@ def _get_fifo_summary_counts(cur):
     return categories, sum(item["count"] for item in categories)
 
 
-def _get_fifo_search_data(cur, search="", offset=0, limit=50, include_total=False):
+def _get_fifo_search_data(cur, search="", offset=0, limit=50, include_total=False, date_from="", date_to=""):
     unit_exprs = _fifo_item_unit_exprs(cur)
-    params = list(FIFO_CATEGORIES)
+    date_sql, date_params = _fifo_date_filter_clause(date_from, date_to)
+    params = list(FIFO_CATEGORIES) + date_params
     search_sql = ""
     if search:
         search_sql = """AND (
@@ -6092,13 +6118,15 @@ def _get_fifo_search_data(cur, search="", offset=0, limit=50, include_total=Fals
             {unit_exprs["unit2"]},
             {unit_exprs["unit3"]},
             {unit_exprs["ratio2"]},
-            {unit_exprs["ratio3"]}
+            {unit_exprs["ratio3"]},
+            (SELECT MAX(hd.TXDATE) FROM ITEMHIST hd WHERE hd.ITEMNO = i.ITEMNO)
         FROM ITEM i
         LEFT JOIN ITEMCATEGORY c ON c.CATEGORYID = i.CATEGORYID
         WHERE COALESCE(i.ITEMTYPE, 0) = 0
           AND COALESCE(i.SUSPENDED, 0) = 0
           AND COALESCE(c.NAME, '') IN ({_build_in_clause(FIFO_CATEGORIES)})
           AND COALESCE((SELECT SUM(QUANTITY) FROM ITEMHIST h WHERE h.ITEMNO = i.ITEMNO), 0) > 0
+          {date_sql}
           {search_sql}
         ORDER BY c.NAME, i.ITEMNO
     """, params)
@@ -6129,8 +6157,9 @@ def _get_fifo_search_data(cur, search="", offset=0, limit=50, include_total=Fals
     return data
 
 
-def _get_fifo_page_data(cur, offset=0, limit=50, include_total=False):
+def _get_fifo_page_data(cur, offset=0, limit=50, include_total=False, date_from="", date_to=""):
     unit_exprs = _fifo_item_unit_exprs(cur)
+    date_sql, date_params = _fifo_date_filter_clause(date_from, date_to)
     cur.execute(f"""
         SELECT FIRST ? SKIP ?
             i.ITEMNO,
@@ -6141,22 +6170,24 @@ def _get_fifo_page_data(cur, offset=0, limit=50, include_total=False):
             {unit_exprs["unit2"]},
             {unit_exprs["unit3"]},
             {unit_exprs["ratio2"]},
-            {unit_exprs["ratio3"]}
+            {unit_exprs["ratio3"]},
+            (SELECT MAX(hd.TXDATE) FROM ITEMHIST hd WHERE hd.ITEMNO = i.ITEMNO)
         FROM ITEM i
         LEFT JOIN ITEMCATEGORY c ON c.CATEGORYID = i.CATEGORYID
         WHERE COALESCE(i.ITEMTYPE, 0) = 0
           AND COALESCE(i.SUSPENDED, 0) = 0
           AND COALESCE(c.NAME, '') IN ({_build_in_clause(FIFO_CATEGORIES)})
           AND COALESCE((SELECT SUM(QUANTITY) FROM ITEMHIST h WHERE h.ITEMNO = i.ITEMNO), 0) > 0
+          {date_sql}
         ORDER BY c.NAME, i.ITEMNO
-    """, [limit, offset] + list(FIFO_CATEGORIES))
+    """, [limit, offset] + list(FIFO_CATEGORIES) + date_params)
     
     page_rows = cur.fetchall()
     
     # We no longer need to check stock in python, the database did it for us
     data = _build_fifo_rows(page_rows, _fetch_fifo_cost_map(cur, [row[0] for row in page_rows]))
     
-    categories, total_items = _get_fifo_summary_counts(cur)
+    categories, total_items = _get_fifo_summary_counts(cur, date_from, date_to)
     summary = {
         "total_items": total_items,
         "total_stock_value": round(sum(float(row.get("nilai_stock") or 0) for row in data), 2),
@@ -6167,16 +6198,16 @@ def _get_fifo_page_data(cur, offset=0, limit=50, include_total=False):
     return data
 
 
-def get_fifo_data(search="", offset=0, limit=50, include_total=False):
+def get_fifo_data(search="", offset=0, limit=50, include_total=False, date_from="", date_to=""):
     try:
         con = fdb.connect(**DB_CONFIG)
         cur = con.cursor()
         if str(search or "").strip():
-            result = _get_fifo_search_data(cur, search, offset, limit, include_total)
+            result = _get_fifo_search_data(cur, search, offset, limit, include_total, date_from, date_to)
             con.close()
             return result
 
-        result = _get_fifo_page_data(cur, offset, limit, include_total)
+        result = _get_fifo_page_data(cur, offset, limit, include_total, date_from, date_to)
         con.close()
         return result
     except Exception as e:
@@ -6195,6 +6226,8 @@ def api_fifo():
         offset=max(int(request.args.get("offset", 0)), 0),
         limit=min(max(int(request.args.get("limit", 50)), 1), 500),
         include_total=True,
+        date_from=request.args.get("date_from", ""),
+        date_to=request.args.get("date_to", ""),
     )
     return jsonify({
         "data": filter_record_columns("fifo", result.get("data", [])),
@@ -6213,6 +6246,8 @@ def api_fifo_export():
         offset=0,
         limit=500000,
         include_total=False,
+        date_from=request.args.get("date_from", ""),
+        date_to=request.args.get("date_to", ""),
     )
     data = filter_record_columns("fifo", data)
     return jsonify({"data": data, "total_rows": len(data)})
