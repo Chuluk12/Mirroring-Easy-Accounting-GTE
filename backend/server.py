@@ -3657,6 +3657,7 @@ def _get_siinas_monitoring_report_full(
                     "itemno": str(row[1] or "").strip(),
                     "qty": float(row[2] or 0),
                     "value": float(row[3] or 0),
+                    "spk_value": float(row[3] or 0),
                     "unit": str(row[4] or "").strip(),
                     "description": str(row[5] or "").strip(),
                     "stok_akhir": float(row[6] or 0),
@@ -3909,7 +3910,10 @@ def _get_siinas_monitoring_report_full(
                 kg_unit = ""
                 easy_unit3 = _siinas_normalize_unit(material.get("unit3"))
                 easy_ratio3 = float(material.get("ratio3") or 0)
-                validation_ratio3 = float(validasi_satuan3_ratio_by_item.get(material["itemno"]) or 0)
+                validation_ratio3 = round(
+                    float(validasi_satuan3_ratio_by_item.get(material["itemno"]) or 0),
+                    4,
+                )
                 if easy_unit3 == _SIINAS_REQUIRED_SATUAN3_UNIT and easy_ratio3 > 0:
                     conversion_ratio3 = easy_ratio3
                     conversion_source = "Easy Accounting"
@@ -3927,6 +3931,7 @@ def _get_siinas_monitoring_report_full(
                     "stok_akhir": material["stok_akhir"],
                     "unit": material["unit"] or str(material["unit1"] or "").strip(),
                     "nilai": value,
+                    "nilai_spk": material["spk_value"],
                     "referensi_harga": material.get("referensi_harga") or {},
                     "akun_persediaan": material["akun_persediaan"],
                     "tipe_persediaan_barang": material["tipe_persediaan_barang"],
@@ -4158,7 +4163,10 @@ def _get_siinas_monitoring_report(search="", offset=0, limit=50, date_from="", d
                 if _siinas_normalize_unit(easy_unit3) == _SIINAS_REQUIRED_SATUAN3_UNIT and float(easy_ratio3 or 0) > 0:
                     ratio3 = float(easy_ratio3 or 0)
                 else:
-                    ratio3 = float(validasi_satuan3_ratio_by_item.get(item_text) or 0)
+                    ratio3 = round(
+                        float(validasi_satuan3_ratio_by_item.get(item_text) or 0),
+                        4,
+                    )
                 if ratio3:
                     totals["kts_standar_kgm"] += float(material_qty or 0) / ratio3
                     totals["nilai_produksi_kgm"] += value

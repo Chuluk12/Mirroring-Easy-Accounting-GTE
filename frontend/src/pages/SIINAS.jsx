@@ -418,7 +418,7 @@ const bahanMaterialColumns = [
   },
   {
     title: 'Nilai KGM (Rp)',
-    dataIndex: 'nilai',
+    dataIndex: 'nilai_spk',
     key: 'nilai_kgm',
     width: 155,
     align: 'right',
@@ -430,7 +430,6 @@ const bahanMaterialColumns = [
       const originalQty = Number(record.qty || 0)
       const originalUnitCost = originalQty ? totalValue / originalQty : 0
       const kgmUnitCost = kgmQty ? totalValue / kgmQty : 0
-      const priceReference = record.referensi_harga || {}
 
       return (
         <Button
@@ -447,15 +446,11 @@ const bahanMaterialColumns = [
                 <InfoRow label="Qty Satuan KGM">{formatQtyWithUnit(kgmQty, 'KGM')}</InfoRow>
                 <InfoRow label={`Harga per ${record.unit || 'satuan asli'}`}>Rp{moneyFormatter.format(originalUnitCost)}</InfoRow>
                 <InfoRow label="Harga per KGM">Rp{moneyFormatter.format(kgmUnitCost)}</InfoRow>
-                <InfoRow label="Rumus nilai">Qty Asli x Harga Satuan Asli</InfoRow>
+                <InfoRow label="Sumber nilai">Jumlah nilai material pada SPK</InfoRow>
+                <InfoRow label="Rumus nilai SPK">Qty Material SPK x Harga Satuan SPK</InfoRow>
                 <InfoRow label="Perhitungan">{numberFormatter.format(originalQty)} x Rp{moneyFormatter.format(originalUnitCost)} = Rp{moneyFormatter.format(totalValue)}</InfoRow>
                 <InfoRow label="Nilai KGM">Rp{moneyFormatter.format(totalValue)}</InfoRow>
-                <div style={{ borderTop: '1px solid #f0f0f0', margin: '6px 0 2px' }} />
-                <InfoRow label="Jenis transaksi harga">{priceReference.jenis_transaksi || '-'}</InfoRow>
-                <InfoRow label="No transaksi">{priceReference.no_transaksi || '-'}</InfoRow>
-                <InfoRow label="Tanggal transaksi">{priceReference.tanggal ? dayjs(priceReference.tanggal).format('DD/MM/YYYY') : '-'}</InfoRow>
-                <InfoRow label="Harga referensi">{priceReference.harga_satuan ? `Rp${moneyFormatter.format(Number(priceReference.harga_satuan))}` : '-'}</InfoRow>
-                <Text type="secondary">Harga referensi berasal dari nilai DPP layer FIFO transaksi pembelian/adjustment di Easy Accounting, tanpa PPN. Konversi ke KGM tidak mengubah nilai total rupiah.</Text>
+                <Text type="secondary">Konversi kuantitas ke KGM tidak mengubah jumlah nilai material yang tersimpan pada SPK.</Text>
               </Space>
             ),
           })}
@@ -592,11 +587,13 @@ function HasilExportTable({ detail }) {
   )
 }
 
-function buildHasilExportRows(details) {
+function buildHasilExportRows(details, onlyConvertibleMaterials = true) {
   let rowNumber = 0
   return (details || []).flatMap(detail => {
     const materials = getGpMaterialRows(detail)
-    const sourceRows = materials.length ? materials : [null]
+    const sourceRows = onlyConvertibleMaterials
+      ? materials.filter(material => getMaterialKgmQty(material) !== null)
+      : materials
     const resultDate = detail?.tgl_hasil ? dayjs(detail.tgl_hasil) : null
     return sourceRows.map((material, index) => {
     const qtyBahanKgm = material ? getMaterialKgmQty(material) : null
@@ -833,8 +830,8 @@ export default function SIINAS() {
                 ? 'number'
                 : (column.dataIndex === 'tgl_hasil' ? 'date' : 'text'),
         }))
-      const rasioUnit3Rows = exportRows
-        .filter(row => Number(row.rasio_3_bahan || 0) > 0)
+      const rasioUnit3Rows = buildHasilExportRows(exportDetails, false)
+        .filter(row => row.qty_bahan_kgm === null)
         .map((row, index) => ({ ...row, no: index + 1 }))
       const missingHsCodeRows = exportRows
         .filter(row => {
