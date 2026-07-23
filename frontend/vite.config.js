@@ -11,6 +11,7 @@ export default defineConfig(({ mode }) => {
     plugins: [react()],
     server: {
       host: '0.0.0.0',
+      allowedHosts: ["akurasi.gte.co.id","easy-mirror.gte.co.id"],
       port: devPort,
       strictPort: false,
     },
