@@ -6,7 +6,7 @@ services:
         FROM python:3.12-slim
         WORKDIR /app
         COPY requirements.txt .
-        RUN apt-get update && apt-get install -y gcc firebird-dev firebird3.0-utils curl \
+        RUN apt-get update && apt-get install -y --no-install-recommends libfbclient2 curl \
             && FBCLIENT="$$(find /usr/lib -name libfbclient.so.2 -print -quit)" \
             && test -n "$$FBCLIENT" \
             && ln -s "$$FBCLIENT" /usr/local/lib/libfbclient.so.2 \
