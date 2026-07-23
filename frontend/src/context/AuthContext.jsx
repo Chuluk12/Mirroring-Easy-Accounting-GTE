@@ -11,8 +11,16 @@ export function AuthProvider({ children }) {
     const token = localStorage.getItem('token')
     const savedUser = localStorage.getItem('user')
     if (token && savedUser) {
-      setAuthToken(token)
-      setUser(JSON.parse(savedUser))
+      try {
+        setAuthToken(token)
+        setUser(JSON.parse(savedUser))
+      } catch {
+        localStorage.removeItem('token')
+        localStorage.removeItem('user')
+        clearAuthToken()
+        setLoading(false)
+        return
+      }
       api.get('/api/me')
         .then(res => {
           localStorage.setItem('user', JSON.stringify(res.data))

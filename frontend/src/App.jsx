@@ -49,7 +49,7 @@ function PrivateRoute({ children, module }) {
 
 function AppRoutes() {
   return (
-    <Suspense fallback={null}>
+    <Suspense fallback={<div style={{ minHeight: '100vh', display: 'grid', placeItems: 'center' }}>Memuat dashboard...</div>}>
       <Routes>
         <Route path="/login" element={<Login />} />
         <Route path="/" element={<PrivateRoute><MainLayout /></PrivateRoute>}>
