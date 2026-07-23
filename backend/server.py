@@ -9996,8 +9996,6 @@ def api_spk():
         return jsonify({"message": "Akses ditolak"}), 403
     try:
         search    = request.args.get("search", "")
-        date_from = request.args.get("date_from", "")
-        date_to   = request.args.get("date_to", "")
         status    = request.args.get("status", "")
         offset    = int(request.args.get("offset", 0))
         limit     = int(request.args.get("limit", 50))
@@ -10019,14 +10017,6 @@ def api_spk():
                 OR LOWER(so.PONO)           CONTAINING LOWER(?)
             )""")
             params_where += [search] * 7
-
-        if date_from:
-            conditions.append("w.WODATE >= ?")
-            params_where.append(date_from)
-
-        if date_to:
-            conditions.append("w.WODATE <= ?")
-            params_where.append(date_to)
 
         status_condition = _spk_item_status_condition(status)
         if status_condition:
