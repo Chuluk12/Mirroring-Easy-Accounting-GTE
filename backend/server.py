@@ -9999,6 +9999,8 @@ def api_spk():
         status    = request.args.get("status", "")
         offset    = int(request.args.get("offset", 0))
         limit     = int(request.args.get("limit", 50))
+        skip_count = request.args.get("skip_count", "").lower() in ("1", "true", "yes")
+        query_limit = limit + 1 if skip_count else limit
 
         con = fdb.connect(**DB_CONFIG)
         cur = con.cursor()
@@ -10027,29 +10029,31 @@ def api_spk():
 
         where_sql = " AND ".join(conditions)
 
-        # Count distinct SPK untuk summary
-        cur.execute(f"""
+        total_spk = total_rows = spk_selesai = spk_berjalan = item_selesai_gp = None
+        if not skip_count:
+            # Count distinct SPK untuk summary
+            cur.execute(f"""
             SELECT COUNT(DISTINCT w.ID)
             FROM WO w
             LEFT JOIN WODET det ON det.WOID  = w.ID
             LEFT JOIN SO so     ON so.SOID   = det.SOID
             LEFT JOIN ITEM i    ON i.ITEMNO  = det.ITEMNO
             WHERE {where_sql}
-        """, params_where)
-        total_spk = int(cur.fetchone()[0] or 0)
+            """, params_where)
+            total_spk = int(cur.fetchone()[0] or 0)
 
         # Count total rows
-        cur.execute(f"""
+            cur.execute(f"""
             SELECT COUNT(*)
             FROM WO w
             LEFT JOIN WODET det ON det.WOID  = w.ID
             LEFT JOIN SO so     ON so.SOID   = det.SOID
             LEFT JOIN ITEM i    ON i.ITEMNO  = det.ITEMNO
             WHERE {where_sql}
-        """, params_where)
-        total_rows = int(cur.fetchone()[0] or 0)
+            """, params_where)
+            total_rows = int(cur.fetchone()[0] or 0)
 
-        cur.execute(f"""
+            cur.execute(f"""
             SELECT
                 SUM(CASE WHEN spk_status = 2 THEN 1 ELSE 0 END),
                 SUM(CASE WHEN spk_status <> 2 THEN 1 ELSE 0 END)
@@ -10064,12 +10068,12 @@ def api_spk():
                 WHERE {where_sql}
                 GROUP BY w.ID
             ) x
-        """, params_where)
-        status_row = cur.fetchone()
-        spk_selesai = int(status_row[0] or 0)
-        spk_berjalan = int(status_row[1] or 0)
+            """, params_where)
+            status_row = cur.fetchone()
+            spk_selesai = int(status_row[0] or 0)
+            spk_berjalan = int(status_row[1] or 0)
 
-        cur.execute(f"""
+            cur.execute(f"""
             SELECT COUNT(*)
             FROM WO w
             LEFT JOIN WODET det ON det.WOID  = w.ID
@@ -10082,8 +10086,8 @@ def api_spk():
                   JOIN PRODRESULT pr ON pr.ID = prd.PRODRESULTID
                   WHERE prd.WODETID = det.ID
               )
-        """, params_where)
-        item_selesai_gp = int(cur.fetchone()[0] or 0)
+            """, params_where)
+            item_selesai_gp = int(cur.fetchone()[0] or 0)
 
         # Query utama
         # Tgl Selesai: PRODRESULTDET.WODETID = WODET.ID
@@ -10114,42 +10118,6 @@ def api_spk():
                 LEFT JOIN ITEM i    ON i.ITEMNO  = det.ITEMNO
                 WHERE {where_sql}
                 ORDER BY w.WODATE DESC, w.WONO, det.NOJOB
-            ),
-            result_agg AS (
-                SELECT
-                    prd.WODETID,
-                    MAX(pr.RESULTDATE) AS TGL_SELESAI,
-                    SUM(COALESCE(prd.QUANTITY, 0)) AS TOTAL_QTY_HASIL
-                FROM PRODRESULTDET prd
-                JOIN PRODRESULT pr ON pr.ID = prd.PRODRESULTID
-                JOIN page_rows p ON p.WODET_ID = prd.WODETID
-                GROUP BY prd.WODETID
-            ),
-            mat_agg AS (
-                SELECT
-                    wdm.WODETID,
-                    SUM(wdm.QUANTITY) AS TOTAL_MAT_PLAN,
-                    SUM(COALESCE(wdm.QTYTAKEN, 0)) AS TOTAL_QTYTAKEN
-                FROM WODETMAT wdm
-                JOIN page_rows p ON p.WODET_ID = wdm.WODETID
-                GROUP BY wdm.WODETID
-            ),
-            release_by_material AS (
-                SELECT
-                    wdm.WODETID,
-                    SUM(md.QUANTITY) AS TOTAL_MAT_KELUAR
-                FROM WODETMAT wdm
-                JOIN page_rows p ON p.WODET_ID = wdm.WODETID
-                JOIN MATRLSDET md ON md.WODETID = wdm.ID
-                GROUP BY wdm.WODETID
-            ),
-            release_by_wodet AS (
-                SELECT
-                    md.WODETID,
-                    SUM(md.QUANTITY) AS TOTAL_MAT_KELUAR
-                FROM MATRLSDET md
-                JOIN page_rows p ON p.WODET_ID = md.WODETID
-                GROUP BY md.WODETID
             )
             SELECT
                 p.WODET_ID,
@@ -10166,20 +10134,37 @@ def api_spk():
                 p.TIPEPERSEDIAAN,
                 p.SONO,
                 p.PONO,
-                ra.TGL_SELESAI,
-                ra.TOTAL_QTY_HASIL,
-                ma.TOTAL_MAT_PLAN,
-                ma.TOTAL_QTYTAKEN,
-                COALESCE(rbm.TOTAL_MAT_KELUAR, rbw.TOTAL_MAT_KELUAR, 0) AS TOTAL_MAT_KELUAR
+                (SELECT MAX(pr.RESULTDATE)
+                 FROM PRODRESULTDET prd
+                 JOIN PRODRESULT pr ON pr.ID = prd.PRODRESULTID
+                 WHERE prd.WODETID = p.WODET_ID),
+                (SELECT SUM(COALESCE(prd.QUANTITY, 0))
+                 FROM PRODRESULTDET prd
+                 WHERE prd.WODETID = p.WODET_ID),
+                (SELECT SUM(wdm.QUANTITY)
+                 FROM WODETMAT wdm
+                 WHERE wdm.WODETID = p.WODET_ID),
+                (SELECT SUM(COALESCE(wdm.QTYTAKEN, 0))
+                 FROM WODETMAT wdm
+                 WHERE wdm.WODETID = p.WODET_ID),
+                COALESCE(
+                    (SELECT SUM(md.QUANTITY)
+                     FROM WODETMAT wdm
+                     JOIN MATRLSDET md ON md.WODETID = wdm.ID
+                     WHERE wdm.WODETID = p.WODET_ID),
+                    (SELECT SUM(md.QUANTITY)
+                     FROM MATRLSDET md
+                     WHERE md.WODETID = p.WODET_ID),
+                    0
+                )
             FROM page_rows p
-            LEFT JOIN result_agg ra           ON ra.WODETID  = p.WODET_ID
-            LEFT JOIN mat_agg ma              ON ma.WODETID  = p.WODET_ID
-            LEFT JOIN release_by_material rbm ON rbm.WODETID = p.WODET_ID
-            LEFT JOIN release_by_wodet rbw    ON rbw.WODETID = p.WODET_ID
             ORDER BY p.WODATE DESC, p.WONO, p.NOJOB
-        """, [limit, offset] + params_where)
+        """, [query_limit, offset] + params_where)
 
         rows = cur.fetchall()
+        has_more = skip_count and len(rows) > limit
+        if has_more:
+            rows = rows[:limit]
         con.close()
 
         data = []
@@ -10234,6 +10219,7 @@ def api_spk():
             "spk_selesai": spk_selesai,
             "spk_berjalan": spk_berjalan,
             "item_selesai_gp": item_selesai_gp,
+            "has_more": has_more,
         })
 
     except Exception as e:

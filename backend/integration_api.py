@@ -23,7 +23,7 @@ COMMON_PARAMS = {
     "date_from", "date_to", "created_from", "created_to",
 }
 ALLOWED_PARAMS = {
-    "spk": {"search", "date_from", "date_to", "status"},
+    "spk": {"search", "date_from", "date_to", "status", "skip_count"},
     "spk-simple": {"search", "date_from", "date_to", "status"},
     "monitoring-formula": {"wodet_id", "qty_only", "skip_count", "no_spk"},
     "standarisasi-material": {"search", "description", "limit", "offset"},
@@ -380,6 +380,8 @@ def _query_params(resource, offset, limit):
             for value in request.args.getlist(key):
                 params.append((key, value))
     params.extend([("offset", offset), ("limit", limit)])
+    if resource == "spk":
+        params.append(("skip_count", "1"))
     if resource in {"stock", "stock-item-material"}:
         params.append(("include_total", "1"))
     return params
@@ -432,7 +434,9 @@ def _success_response(resource, upstream, offset, limit):
             or ((request.args.get("date_from") or request.args.get("date_to")) and "date_from" not in ALLOWED_PARAMS[resource])
             or (request.args.get("search") and "search" not in ALLOWED_PARAMS[resource])
         )
-        total = len(shaped_rows) if filtered_locally else int(upstream.get("total", len(original_rows)) or 0)
+        total = None if upstream.get("total") is None else (
+            len(shaped_rows) if filtered_locally else int(upstream.get("total", len(original_rows)) or 0)
+        )
         extra = {
             key: value
             for key, value in upstream.items()
@@ -440,7 +444,8 @@ def _success_response(resource, upstream, offset, limit):
         }
 
     page = (offset // limit) + 1 if limit else 1
-    total_page = ((total + limit - 1) // limit) if limit else 0
+    total_page = ((total + limit - 1) // limit) if limit and total is not None else None
+    has_more = upstream.get("has_more") if isinstance(upstream, dict) else None
 
     return {
         "success": True,
@@ -455,7 +460,7 @@ def _success_response(resource, upstream, offset, limit):
             "count": len(rows),
             "total": total,
             "total_page": total_page,
-            "has_more": offset + len(rows) < total,
+            "has_more": bool(has_more) if has_more is not None else offset + len(rows) < total,
             **extra,
         },
     }, 200
