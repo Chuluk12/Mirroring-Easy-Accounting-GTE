@@ -6,6 +6,7 @@ from flask_jwt_extended import (
     get_jwt_identity, get_jwt
 )
 from datetime import datetime, timedelta
+from ctypes.util import find_library
 from functools import lru_cache
 from pathlib import Path
 import xml.etree.ElementTree as ET
@@ -81,7 +82,14 @@ socketio = SocketIO(
     max_http_buffer_size=50*1024*1024,
 )
 
-fdb.load_api("C:/Program Files/Firebird/Firebird_3_0/fbclient.dll")
+fbclient_path = os.getenv("EASY_FBCLIENT_PATH", "").strip()
+if not fbclient_path:
+    fbclient_path = (
+        "C:/Program Files/Firebird/Firebird_3_0/fbclient.dll"
+        if os.name == "nt"
+        else find_library("fbclient") or "libfbclient.so.2"
+    )
+fdb.load_api(fbclient_path)
 
 register_integration_api(app)
 
