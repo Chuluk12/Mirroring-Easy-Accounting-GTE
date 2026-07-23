@@ -30,3 +30,15 @@
 .siinas-material-section .ant-empty-normal {
   margin: 18px 0;
 }
+
+.siinas-gp-tabs .ant-tabs-nav {
+  margin-bottom: 12px;
+}
+
+.siinas-gp-tabs .ant-table-wrapper {
+  margin: 0;
+}
+
+.siinas-gp-tabs .ant-table-thead > tr > th {
+  background: #fbfcff;
+}
