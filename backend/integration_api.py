@@ -32,6 +32,11 @@ ALLOWED_PARAMS = {
         "minimum_qty", "stock_note", "code_product", "cost_description",
         "unit", "category", "sort_field", "sort_order", "date_from", "date_to",
     },
+    "stock-item-material": {
+        "search", "itemno", "description", "description2", "quantity",
+        "minimum_qty", "stock_note", "code_product", "cost_description",
+        "unit", "category", "sort_field", "sort_order", "date_from", "date_to", "aggregate",
+    },
     "biaya-produksi": {"search", "account", "status"},
     "standarisasi-harga": {"search", "status", "date_from", "date_to"},
     "fifo": {"search", "columns", "date_from", "date_to"},
@@ -375,7 +380,7 @@ def _query_params(resource, offset, limit):
             for value in request.args.getlist(key):
                 params.append((key, value))
     params.extend([("offset", offset), ("limit", limit)])
-    if resource == "stock":
+    if resource in {"stock", "stock-item-material"}:
         params.append(("include_total", "1"))
     return params
 
@@ -409,6 +414,16 @@ def _success_response(resource, upstream, offset, limit):
         extra = {}
     else:
         original_rows = upstream.get("data", [])
+        if resource == "stock-item-material":
+            fields = (
+                "category", "cost_description", "description", "description2",
+                "harga_awal", "harga_terakhir", "harga_baru",
+                "itemno", "last_updated_txdate", "minimum_qty",
+                "no_stb", "quantity", "unit", "satuan_1", "stok_satuan_1",
+                "satuan_2", "stok_satuan_2", "satuan_3", "stok_satuan_3",
+                "total_nilai_stock",
+            )
+            original_rows = [{key: row.get(key) for key in fields} for row in original_rows]
         shaped_rows = _shape_rows(original_rows, resource, select_columns=False)
         rows = _select_columns(shaped_rows)
         filtered_locally = bool(
@@ -619,6 +634,10 @@ def register_integration_api(app):
     @blueprint.get("/monitoring-formula")
     def monitoring_formula():
         return list_resource("monitoring-formula", "/api/monitoring-formula")
+
+    @blueprint.get("/stock-item-material")
+    def stock_item_material():
+        return list_resource("stock-item-material", "/api/stock-item-material")
 
     @blueprint.get("/stock")
     def stock():

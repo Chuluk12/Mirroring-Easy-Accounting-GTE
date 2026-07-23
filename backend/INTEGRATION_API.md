@@ -53,6 +53,7 @@ EASY_INTEGRATION_API_KEYS=<KEY_LAMA>,<KEY_BARU>
 GET /health
 GET /spk
 GET /stock
+GET /stock-item-material
 GET /biaya-produksi
 GET /standarisasi-harga
 GET /fifo
@@ -69,6 +70,9 @@ maksimum 500.
 
 - SPK: `search`, `date_from`, `date_to`, `status`
 - Stok: `search`, `itemno`, `description`, `description2`, `quantity`,
+  `minimum_qty`, `stock_note`, `code_product`, `cost_description`, `unit`,
+  `category`, `sort_field`, `sort_order`
+- Stock Item Material: `search`, `itemno`, `description`, `description2`, `quantity`,
   `minimum_qty`, `stock_note`, `code_product`, `cost_description`, `unit`,
   `category`, `sort_field`, `sort_order`
 - Biaya Produksi: `search`, `account`, `status`
@@ -168,7 +172,7 @@ Tes satu record:
 
 ```powershell
 Invoke-RestMethod `
-  -Uri "http://127.0.0.1:5000/api/integration/v1/stock?limit=1" `
+  -Uri "http://127.0.0.1:5000/api/integration/v1/stock-item-material?limit=1" `
   -Headers $headers
 ```
 
