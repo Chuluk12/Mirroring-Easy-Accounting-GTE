@@ -10006,7 +10006,10 @@ def api_spk():
         conditions   = ["1=1"]
         params_where = []
 
-        if search:
+        if "SPK-" in search.upper():
+            conditions.append("w.WONO CONTAINING ?")
+            params_where.append(search)
+        elif search:
             conditions.append("""(
                 LOWER(w.WONO)               CONTAINING LOWER(?)
                 OR LOWER(w.DESCRIPTION)     CONTAINING LOWER(?)
