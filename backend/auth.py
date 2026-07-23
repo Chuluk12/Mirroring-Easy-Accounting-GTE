@@ -5,6 +5,67 @@ import json
 from datetime import datetime
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "users.db")
+DASHBOARD_DB_KIND = "postgres"
+
+
+def _postgres_placeholders(sql):
+    return str(sql).replace("?", "%s")
+
+
+class _PostgresCursor:
+    def __init__(self, cursor):
+        self._cursor = cursor
+
+    def execute(self, sql, params=None):
+        self._cursor.execute(_postgres_placeholders(sql), params or ())
+        return self
+
+    def executemany(self, sql, params):
+        self._cursor.executemany(_postgres_placeholders(sql), params)
+        return self
+
+    def __getattr__(self, name):
+        return getattr(self._cursor, name)
+
+
+class _PostgresConnection:
+    def __init__(self, connection):
+        self._connection = connection
+
+    def cursor(self):
+        return _PostgresCursor(self._connection.cursor())
+
+    def __getattr__(self, name):
+        return getattr(self._connection, name)
+
+
+def connect_dashboard_db():
+    try:
+        import psycopg2
+    except ImportError as exc:
+        raise RuntimeError(
+            "Driver PostgreSQL belum terpasang; jalankan pip install -r requirements.txt"
+        ) from exc
+
+    database_url = os.getenv("DASHBOARD_DATABASE_URL", "").strip()
+    if database_url:
+        connection = psycopg2.connect(database_url)
+    else:
+        required = ("APP_DB_HOST", "APP_DB_NAME", "APP_DB_USER")
+        missing = [key for key in required if not os.getenv(key, "").strip()]
+        if missing:
+            raise RuntimeError(
+                "Konfigurasi PostgreSQL dashboard belum lengkap: " + ", ".join(missing)
+            )
+        connection = psycopg2.connect(
+            host=os.environ["APP_DB_HOST"],
+            port=int(os.getenv("APP_DB_PORT", "5432")),
+            dbname=os.environ["APP_DB_NAME"],
+            user=os.environ["APP_DB_USER"],
+            password=os.getenv("APP_DB_PASSWORD", ""),
+            connect_timeout=int(os.getenv("APP_DB_CONNECT_TIMEOUT", "5")),
+        )
+    return _PostgresConnection(connection)
 
 def ensure_audit_table(cur):
     cur.execute("""
