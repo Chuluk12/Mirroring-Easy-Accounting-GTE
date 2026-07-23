@@ -1055,22 +1055,87 @@ def _stock_rows_to_records(rows, cost_description_by_item=None):
     return data
 
 
-def _is_stock_code_search(search):
-    text = str(search or "").strip()
-    return "-" in text and any(ch.isalpha() for ch in text) and any(ch.isdigit() for ch in text)
+def _stock_item_material_cost_by_item(cur, item_nos):
+    fifo_history = {}
+    standard_history = {}
+    for start in range(0, len(item_nos), 900):
+        item_chunk = item_nos[start:start + 900]
+        in_clause = _build_in_clause(item_chunk)
+        cur.execute(f"""
+            SELECT ITEMNO, TXDATE, ITEMHISTID, QUANTITY, COST
+            FROM ITEMHIST
+            WHERE ITEMNO IN ({in_clause})
+              AND COALESCE(COST, 0) <> 0
+            ORDER BY ITEMNO, TXDATE, ITEMHISTID
+        """, item_chunk)
+        for item_no, tx_date, _itemhist_id, quantity, cost in cur.fetchall():
+            key = str(item_no or "").strip()
+            if key:
+                quantity = float(quantity or 0)
+                fifo_cost = float(cost or 0)
+                if quantity < 0:
+                    fifo_cost = abs(fifo_cost / quantity)
+                fifo_history.setdefault(key, []).append((fifo_cost, tx_date))
+
+        cur.execute(f"""
+            SELECT d.ITEMNO, s.NOSTANDARBRG, d.NEWCOST, s.TGLMULAIBRG, s.TGLSTANDARBRG
+            FROM STANDARBIAYABRG s
+            JOIN STANDARBIAYABRGDET d ON d.NOSTANDARBRG = s.NOSTANDARBRG
+            WHERE d.ITEMNO IN ({in_clause})
+              AND COALESCE(d.NEWCOST, 0) > 0
+            ORDER BY d.ITEMNO, s.TGLMULAIBRG, s.TGLSTANDARBRG, s.NOSTANDARBRG
+        """, item_chunk)
+        for item_no, standard_no, new_cost, effective_date, standard_date in cur.fetchall():
+            key = str(item_no or "").strip()
+            if key:
+                standard_history.setdefault(key, []).append((
+                    float(new_cost or 0),
+                    str(standard_no or "").strip(),
+                    effective_date or standard_date,
+                ))
+
+    result = {}
+    for key in set(fifo_history) | set(standard_history):
+        fifo_current = fifo_history[key][-1][0] if fifo_history.get(key) else 0.0
+        if standard_history.get(key):
+            history = standard_history[key]
+            current, standard_no, updated_at = history[-1]
+            result[key] = {
+                "cost_description": standard_no,
+                "harga_awal": fifo_current,
+                "harga_terakhir": history[-2][0] if len(history) > 1 else fifo_current,
+                "harga_baru": current,
+                "no_stb": standard_no,
+                "last_updated_txdate": str(updated_at)[:10] if updated_at else "",
+            }
+        else:
+            history = fifo_history[key]
+            current, updated_at = history[-1]
+            result[key] = {
+                "cost_description": "FIFO",
+                "harga_awal": current,
+                "harga_terakhir": current,
+                "harga_baru": current,
+                "no_stb": "",
+                "last_updated_txdate": str(updated_at)[:10] if updated_at else "",
+            }
+    return result
 
 
-def _get_stock_search_fallback(cur, search, limit, offset, code_product_expr, filters=None):
+def _is_stock_code_search(value):
+    value = str(value or "").strip()
+    return "-" in value and any(char.isalpha() for char in value) and any(char.isdigit() for char in value)
+
+
+def _get_stock_search_fallback(cur, search, limit, offset, code_product_expr, filters=None, date_from="", date_to=""):
     search = str(search or "").strip()
     if not search:
         return [], 0
-    normalized_search = _normalize_stock_code_search(search)
-    normalized_itemno_expr = _stock_normalized_code_expr("i.ITEMNO")
-    normalized_code_product_expr = _stock_normalized_code_expr(code_product_expr)
+    is_code_search = _is_stock_code_search(search)
     token_values = [
         token for token in "".join(ch if ch.isalnum() else " " for ch in search).split()
         if len(token) >= 2
-    ]
+    ] if not is_code_search else []
     token_condition = ""
     token_params = []
     if token_values:
@@ -1129,11 +1194,16 @@ def _get_stock_search_fallback(cur, search, limit, offset, code_product_expr, fi
             """, [limit, offset] + code_params + [search, search])
             return cur.fetchall(), code_total
 
-    where_sql = f"""
-        i.ITEMNO IS NOT NULL
-        AND COALESCE(i.SUSPENDED, 0) = 0
-        {extra_conditions}
-        AND (
+    if is_code_search:
+        search_condition = f"""(
+            UPPER(i.ITEMNO) = UPPER(?)
+            OR UPPER(i.ITEMNO) STARTING WITH UPPER(?)
+            OR UPPER({code_product_expr}) = UPPER(?)
+            OR UPPER({code_product_expr}) STARTING WITH UPPER(?)
+        )"""
+        search_params = [search, f"{search}-", search, f"{search}-"]
+    else:
+        search_condition = f"""(
             LOWER(i.ITEMNO) CONTAINING LOWER(?)
             OR LOWER(i.ITEMDESCRIPTION) CONTAINING LOWER(?)
             OR LOWER(i.ITEMDESCRIPTION2) CONTAINING LOWER(?)
@@ -1141,7 +1211,14 @@ def _get_stock_search_fallback(cur, search, limit, offset, code_product_expr, fi
             OR {normalized_itemno_expr} CONTAINING ?
             OR {normalized_code_product_expr} CONTAINING ?
             {token_condition}
-        )
+        )"""
+        search_params = [search, search, search, search] + token_params
+
+    where_sql = f"""
+        i.ITEMNO IS NOT NULL
+        AND COALESCE(i.SUSPENDED, 0) = 0
+        {extra_conditions}
+        AND {search_condition}
     """
     params = code_filter_params + [
         search, search, search, search,
@@ -1259,6 +1336,122 @@ def get_stock_data(search="", offset=0, limit=50, filters=None, include_total=Fa
     except Exception as e:
         print(f"Error get_stock_data: {e}")
         return {"data": [], "total": 0} if include_total else []
+
+
+def _aggregate_stock_item_material(rows):
+    by_item = {row["itemno"]: row for row in rows}
+    children_by_root = {}
+    for row in rows:
+        roots = [root for root in by_item if row["itemno"].startswith(f"{root}-")]
+        if roots:
+            children_by_root.setdefault(max(roots, key=len), []).append(row)
+
+    hidden = set()
+    for root_no, children in children_by_root.items():
+        root = by_item[root_no]
+        if float(root.get("stok_satuan_1") or 0) != 0:
+            continue
+
+        stock_by_unit = {}
+        total_value = float(root.get("total_nilai_stock") or 0)
+        for child in children:
+            unit = str(child.get("satuan_1") or child.get("unit") or "").strip()
+            if unit:
+                stock_by_unit[unit] = stock_by_unit.get(unit, 0) + float(child.get("stok_satuan_1") or 0)
+            total_value += float(child.get("total_nilai_stock") or 0)
+            hidden.add(child["itemno"])
+
+        root_unit = str(root.get("satuan_1") or root.get("unit") or "").strip()
+        if root_unit in stock_by_unit:
+            root["stok_satuan_1"] = round(stock_by_unit.pop(root_unit), 4)
+            root["quantity"] = root["stok_satuan_1"]
+
+        for slot in (2, 3):
+            slot_unit = str(root.get(f"satuan_{slot}") or "").strip()
+            if slot_unit in stock_by_unit:
+                root[f"stok_satuan_{slot}"] = round(stock_by_unit.pop(slot_unit), 4)
+            elif stock_by_unit:
+                unit, stock = next(iter(stock_by_unit.items()))
+                stock_by_unit.pop(unit)
+                root[f"satuan_{slot}"] = unit
+                root[f"stok_satuan_{slot}"] = round(stock, 4)
+
+        root["total_nilai_stock"] = round(total_value, 2)
+
+    data = [row for row in rows if row["itemno"] not in hidden]
+    return {"data": data, "total": len(data)}
+
+
+def get_stock_item_material_data(search="", offset=0, limit=50, filters=None, sort_field="", sort_order="", aggregate=False):
+    result = get_stock_data(search, offset, limit, filters, True, sort_field, sort_order)
+    rows = result.get("data", [])
+    item_nos = [row["itemno"] for row in rows if row.get("itemno")]
+    cost_by_item = {}
+    stock_units_by_item = {}
+    if item_nos:
+        con = fdb.connect(**DB_CONFIG)
+        try:
+            cur = con.cursor()
+            cost_by_item = _stock_item_material_cost_by_item(cur, item_nos)
+            unit_exprs = _fifo_item_unit_exprs(cur)
+            for start in range(0, len(item_nos), 900):
+                chunk = item_nos[start:start + 900]
+                cur.execute(f"""
+                    SELECT
+                        i.ITEMNO,
+                        i.UNIT1,
+                        {unit_exprs["unit2"]},
+                        {unit_exprs["unit3"]},
+                        {unit_exprs["ratio2"]},
+                        {unit_exprs["ratio3"]}
+                    FROM ITEM i
+                    WHERE i.ITEMNO IN ({_build_in_clause(chunk)})
+                """, chunk)
+                for item_no, unit1, unit2, unit3, ratio2, ratio3 in cur.fetchall():
+                    stock_units_by_item[str(item_no or "").strip()] = {
+                        "satuan_1": str(unit1 or "").strip(),
+                        "satuan_2": str(unit2 or "").strip(),
+                        "satuan_3": str(unit3 or "").strip(),
+                        "ratio_2": float(ratio2 or 0),
+                        "ratio_3": float(ratio3 or 0),
+                    }
+        finally:
+            con.close()
+    fields = (
+        "category", "description", "description2", "itemno", "minimum_qty",
+        "quantity", "unit",
+    )
+    data = []
+    for row in rows:
+        cost = cost_by_item.get(row["itemno"], {})
+        units = stock_units_by_item.get(row["itemno"], {})
+        quantity = float(row.get("quantity") or 0)
+        item = {key: row.get(key) for key in fields}
+        item.update({
+            "cost_description": cost.get("cost_description", ""),
+            "harga_awal": cost.get("harga_awal", 0.0),
+            "harga_terakhir": cost.get("harga_terakhir", 0.0),
+            "harga_baru": cost.get("harga_baru", 0.0),
+            "total_nilai_stock": round(quantity * float(cost.get("harga_baru") or 0), 2),
+            "last_updated_txdate": cost.get("last_updated_txdate", ""),
+            "no_stb": cost.get("no_stb", ""),
+            "satuan_1": units.get("satuan_1", row.get("unit", "")),
+            "stok_satuan_1": round(quantity, 4),
+            "satuan_2": units.get("satuan_2", ""),
+            "stok_satuan_2": (
+                None if not units.get("satuan_2")
+                else round(_fifo_convert_stock(quantity, units.get("ratio_2")) or 0, 4)
+            ),
+            "satuan_3": units.get("satuan_3", ""),
+            "stok_satuan_3": (
+                None if not units.get("satuan_3")
+                else round(_fifo_convert_stock(quantity, units.get("ratio_3")) or 0, 4)
+            ),
+        })
+        data.append(item)
+    if aggregate:
+        return _aggregate_stock_item_material(data)
+    return {"data": data, "total": int(result.get("total") or 0)}
 
 
 def get_stock_summary():
@@ -1465,6 +1658,29 @@ def api_stock():
             "total": int(result.get("total") or 0),
         })
     return jsonify(filter_record_columns("stock", result))
+
+
+@app.route("/api/stock-item-material")
+@jwt_required()
+def api_stock_item_material():
+    if not check_permission("stock"):
+        return jsonify({"message": "Akses ditolak"}), 403
+    filters = {
+        key: _split_filter_values(request.args.get(key))
+        for key in (
+            "itemno", "description", "description2", "quantity", "minimum_qty",
+            "stock_note", "code_product", "cost_description", "unit", "category",
+        )
+    }
+    return jsonify(get_stock_item_material_data(
+        search=request.args.get("search", ""),
+        offset=int(request.args.get("offset", 0)),
+        limit=int(request.args.get("limit", 50)),
+        filters=filters,
+        sort_field=request.args.get("sort_field", ""),
+        sort_order=request.args.get("sort_order", ""),
+        aggregate=request.args.get("aggregate", "").lower() in {"1", "true", "yes"},
+    ))
 
 
 @app.route("/api/stock/export")
