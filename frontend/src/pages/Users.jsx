@@ -16,6 +16,7 @@ const { Option } = Select
 const MODULE_META = {
   dashboard:     { label: 'Dashboard',          color: 'blue' },
   stock:         { label: 'Stok Barang',         color: 'cyan' },
+  gudang:        { label: 'Gudang',              color: 'blue' },
   'barang-baru': { label: 'Barang Baru',         color: 'geekblue' },
   riwayat:       { label: 'Riwayat Persediaan',  color: 'purple' },
   siinas:        { label: 'Siinas',              color: 'magenta' },
@@ -24,6 +25,8 @@ const MODULE_META = {
   penjualan_pengiriman: { label: 'Penjualan - Daftar Pengiriman', color: 'green' },
   penjualan_invoice: { label: 'Penjualan - Daftar Invoice', color: 'green' },
   pembelian:     { label: 'Daftar Pembelian',    color: 'orange' },
+  pembelian_pemasok: { label: 'Pembelian - Pemasok', color: 'orange' },
+  pembelian_pemasok_edit: { label: 'Pembelian - Edit Status Pemasok', color: 'volcano' },
   pembelian_permintaan: { label: 'Pembelian - Daftar Permintaan', color: 'orange' },
   pembelian_pembelian: { label: 'Pembelian - Daftar Pembelian', color: 'orange' },
   pembelian_penerimaan: { label: 'Pembelian - Daftar Penerimaan', color: 'orange' },
@@ -68,6 +71,9 @@ const ROLE_COLOR = {
 const roleColor = (role) => ROLE_COLOR[role] || 'default'
 
 const MODULE_PARENT = {
+  gudang: 'stock',
+  pembelian_pemasok: 'pembelian',
+  pembelian_pemasok_edit: 'pembelian',
   pembelian_permintaan: 'pembelian',
   pembelian_pembelian: 'pembelian',
   pembelian_penerimaan: 'pembelian',

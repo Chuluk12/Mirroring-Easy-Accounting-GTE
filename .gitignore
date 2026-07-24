@@ -11,3 +11,6 @@ frontend/.env
 backend/.env
 
 *.db
+
+# Local database and SIINAS backups (may contain sensitive data)
+backups/

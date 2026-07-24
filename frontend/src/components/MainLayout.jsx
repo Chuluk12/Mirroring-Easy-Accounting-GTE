@@ -84,6 +84,9 @@ export default function MainLayout() {
     if (hasPermission('stock')) {
       persediaanChildren.push({ key: '/stock', icon: <InboxOutlined />, label: 'Stok Barang' })
     }
+    if (hasPermission('gudang')) {
+      persediaanChildren.push({ key: '/gudang', icon: <ContainerOutlined />, label: 'Gudang' })
+    }
     if (hasPermission('barang-baru')) {
       persediaanChildren.push({ key: '/barang-baru', icon: <PlusCircleOutlined />, label: 'Barang Baru' })
     }
@@ -128,6 +131,9 @@ export default function MainLayout() {
     }
 
     const pembelianChildren = []
+    if (hasPermission('pembelian_pemasok')) {
+      pembelianChildren.push({ key: '/pembelian/pemasok', icon: <TeamOutlined />, label: 'Pemasok' })
+    }
     if (hasPermission('pembelian_permintaan')) {
       pembelianChildren.push({ key: '/pembelian/permintaan', icon: <FileTextOutlined />, label: 'Daftar Permintaan' })
     }
@@ -247,7 +253,7 @@ export default function MainLayout() {
 
   const getDefaultOpenKeys = () => {
     const path = location.pathname
-    if (['/stock', '/barang-baru', '/riwayat'].includes(path)) return ['persediaan']
+    if (['/stock', '/gudang', '/barang-baru', '/riwayat'].includes(path)) return ['persediaan']
     if (path.startsWith('/pembelian')) return ['pembelian-group']
     if (path.startsWith('/penjualan')) return ['penjualan-group']
     if (path.startsWith('/manufaktur')) return ['manufaktur-group']

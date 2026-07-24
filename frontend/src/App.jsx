@@ -5,6 +5,7 @@ import { AuthProvider, useAuth } from './context/AuthContext'
 import MainLayout from './components/MainLayout'
 const Dashboard = lazy(() => import('./pages/Dashboard'))
 const Stock = lazy(() => import('./pages/Stock'))
+const Gudang = lazy(() => import('./pages/Gudang'))
 const SIINAS = lazy(() => import('./pages/SIINAS'))
 const SIINASReferensi = lazy(() => import('./pages/SIINASReferensi'))
 const SIINASValidasiMaterialSatuan3 = lazy(() => import('./pages/SIINASValidasiMaterialSatuan3'))
@@ -15,6 +16,7 @@ const AuditLog = lazy(() => import('./pages/AuditLog'))
 const Login = lazy(() => import('./pages/Login'))
 
 // Sub-halaman Pembelian
+const Pemasok = lazy(() => import('./pages/Pembelian/Pemasok'))
 const DaftarPermintaan = lazy(() => import('./pages/Pembelian/DaftarPermintaan'))
 const DaftarPembelian = lazy(() => import('./pages/Pembelian/DaftarPembelian'))
 const DaftarPenerimaan = lazy(() => import('./pages/Pembelian/DaftarPenerimaan'))
@@ -55,6 +57,7 @@ function AppRoutes() {
         <Route path="/" element={<PrivateRoute><MainLayout /></PrivateRoute>}>
           <Route index element={<Dashboard />} />
           <Route path="stock"       element={<PrivateRoute module="stock"><Stock /></PrivateRoute>} />
+          <Route path="gudang"      element={<PrivateRoute module="gudang"><Gudang /></PrivateRoute>} />
           <Route path="siinas/monitoring-report" element={<PrivateRoute module="siinas"><SIINAS /></PrivateRoute>} />
           <Route path="siinas/referensi" element={<PrivateRoute module="siinas"><SIINASReferensi /></PrivateRoute>} />
           <Route path="siinas/validasi-material-satuan-3" element={<PrivateRoute module="siinas"><SIINASValidasiMaterialSatuan3 /></PrivateRoute>} />
@@ -65,6 +68,7 @@ function AppRoutes() {
           <Route path="audit-log"   element={<PrivateRoute module="audit"><AuditLog /></PrivateRoute>} />
 
           {/* Sub-menu Pembelian */}
+          <Route path="pembelian/pemasok" element={<PrivateRoute module="pembelian_pemasok"><Pemasok /></PrivateRoute>} />
           <Route path="pembelian/permintaan" element={<PrivateRoute module="pembelian_permintaan"><DaftarPermintaan /></PrivateRoute>} />
           <Route path="pembelian/pembelian"  element={<PrivateRoute module="pembelian_pembelian"><DaftarPembelian /></PrivateRoute>} />
           <Route path="pembelian/penerimaan" element={<PrivateRoute module="pembelian_penerimaan"><DaftarPenerimaan /></PrivateRoute>} />

@@ -1,7 +1,8 @@
-import sqlite3
 import bcrypt
 import os
 import json
+import re
+import sqlite3
 from datetime import datetime
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "users.db")
@@ -67,26 +68,174 @@ def connect_dashboard_db():
         )
     return _PostgresConnection(connection)
 
-def ensure_audit_table(cur):
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS audit_logs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT,
-            name TEXT,
-            role TEXT,
-            action TEXT NOT NULL,
-            module TEXT,
-            description TEXT,
-            metadata TEXT,
-            ip_address TEXT,
-            user_agent TEXT,
-            created_at TEXT NOT NULL
-        )
-    """)
 
-def init_db():
-    con = sqlite3.connect(DB_PATH)
-    cur = con.cursor()
+def _load_env_file():
+    env_path = os.path.join(os.path.dirname(__file__), ".env")
+    if not os.path.exists(env_path):
+        return
+    with open(env_path, "r", encoding="utf-8") as handle:
+        for raw_line in handle:
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+
+
+_load_env_file()
+DASHBOARD_DATABASE_URL = os.getenv("DASHBOARD_DATABASE_URL", "").strip()
+APP_DB_ENGINE = os.getenv("APP_DB_ENGINE", "").strip().lower()
+DASHBOARD_DB_KIND = "postgres" if DASHBOARD_DATABASE_URL or APP_DB_ENGINE == "postgres" else "sqlite"
+
+
+def _require_psycopg2():
+    try:
+        import psycopg2
+    except ImportError as exc:
+        raise RuntimeError(
+            "DASHBOARD_DATABASE_URL sudah diset, tapi dependency psycopg2-binary belum terinstall."
+        ) from exc
+    return psycopg2
+
+
+def get_dashboard_pg_connect_kwargs():
+    if DASHBOARD_DATABASE_URL:
+        return {"dsn": DASHBOARD_DATABASE_URL}
+    return {
+        "host": os.getenv("APP_DB_HOST", "127.0.0.1"),
+        "port": int(os.getenv("APP_DB_PORT", "5432")),
+        "dbname": os.getenv("APP_DB_NAME", "easy_dashboard_gte"),
+        "user": os.getenv("APP_DB_USER", "postgres"),
+        "password": os.getenv("APP_DB_PASSWORD", ""),
+    }
+
+
+def _pg_sql(sql):
+    sql = sql.replace("?", "%s")
+    match = re.match(
+        r"^(\s*)INSERT\s+OR\s+IGNORE\s+INTO\s+(.+?)\s+VALUES\s*(\(.+\))\s*$",
+        sql,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if match:
+        indent, head, values = match.groups()
+        return f"{indent}INSERT INTO {head} VALUES {values} ON CONFLICT DO NOTHING"
+    return sql
+
+
+class DashboardCursor:
+    def __init__(self, cursor):
+        self.cursor = cursor
+
+    @property
+    def rowcount(self):
+        return self.cursor.rowcount
+
+    def execute(self, sql, params=None):
+        if DASHBOARD_DB_KIND == "postgres":
+            sql = _pg_sql(sql)
+        return self.cursor.execute(sql, params or [])
+
+    def executemany(self, sql, seq_of_params):
+        if DASHBOARD_DB_KIND == "postgres":
+            sql = _pg_sql(sql)
+        return self.cursor.executemany(sql, seq_of_params)
+
+    def fetchone(self):
+        return self.cursor.fetchone()
+
+    def fetchall(self):
+        return self.cursor.fetchall()
+
+
+class DashboardConnection:
+    def __init__(self, connection):
+        self.connection = connection
+
+    def cursor(self):
+        return DashboardCursor(self.connection.cursor())
+
+    def commit(self):
+        self.connection.commit()
+
+    def rollback(self):
+        self.connection.rollback()
+
+    def close(self):
+        self.connection.close()
+
+
+def connect_dashboard_db():
+    if DASHBOARD_DB_KIND == "postgres":
+        psycopg2 = _require_psycopg2()
+        kwargs = get_dashboard_pg_connect_kwargs()
+        if "dsn" in kwargs:
+            return DashboardConnection(psycopg2.connect(kwargs["dsn"]))
+        return DashboardConnection(psycopg2.connect(**kwargs))
+    return DashboardConnection(sqlite3.connect(DB_PATH))
+
+
+def _integrity_error_types():
+    errors = [sqlite3.IntegrityError]
+    if DASHBOARD_DB_KIND == "postgres":
+        errors.append(_require_psycopg2().IntegrityError)
+    return tuple(errors)
+
+
+def _table_columns(cur, table_name):
+    if DASHBOARD_DB_KIND == "postgres":
+        cur.execute("""
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = ?
+        """, (table_name,))
+        return {row[0] for row in cur.fetchall()}
+    cur.execute(f"PRAGMA table_info({table_name})")
+    return {row[1] for row in cur.fetchall()}
+
+
+def _create_tables(cur):
+    if DASHBOARD_DB_KIND == "postgres":
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id SERIAL PRIMARY KEY,
+                username TEXT UNIQUE NOT NULL,
+                password TEXT NOT NULL,
+                name TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'viewer'
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS roles (
+                id SERIAL PRIMARY KEY,
+                role TEXT NOT NULL,
+                module TEXT NOT NULL,
+                UNIQUE(role, module)
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS role_column_permissions (
+                id SERIAL PRIMARY KEY,
+                role TEXT NOT NULL,
+                module TEXT NOT NULL,
+                column_key TEXT NOT NULL,
+                UNIQUE(role, module, column_key)
+            )
+        """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS barang_baru_log (
+                id SERIAL PRIMARY KEY,
+                itemid INTEGER UNIQUE NOT NULL,
+                itemno TEXT NOT NULL,
+                description TEXT,
+                description2 TEXT,
+                unit TEXT,
+                type TEXT,
+                created_by TEXT,
+                created_at TEXT NOT NULL
+            )
+        """)
+        return
 
     cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
@@ -130,8 +279,32 @@ def init_db():
             created_at TEXT NOT NULL
         )
     """)
-    cur.execute("PRAGMA table_info(barang_baru_log)")
-    barang_baru_columns = {row[1] for row in cur.fetchall()}
+
+def ensure_audit_table(cur):
+    id_type = "SERIAL" if DASHBOARD_DB_KIND == "postgres" else "INTEGER"
+    autoincrement = "" if DASHBOARD_DB_KIND == "postgres" else " AUTOINCREMENT"
+    cur.execute(f"""
+        CREATE TABLE IF NOT EXISTS audit_logs (
+            id {id_type} PRIMARY KEY{autoincrement},
+            username TEXT,
+            name TEXT,
+            role TEXT,
+            action TEXT NOT NULL,
+            module TEXT,
+            description TEXT,
+            metadata TEXT,
+            ip_address TEXT,
+            user_agent TEXT,
+            created_at TEXT NOT NULL
+        )
+    """)
+
+def init_db():
+    con = connect_dashboard_db()
+    cur = con.cursor()
+
+    _create_tables(cur)
+    barang_baru_columns = _table_columns(cur, "barang_baru_log")
     if "created_by" not in barang_baru_columns:
         cur.execute("ALTER TABLE barang_baru_log ADD COLUMN created_by TEXT")
 
@@ -145,9 +318,10 @@ def init_db():
     # produksi  → dashboard, stock, spk
     # ppc       → dashboard, stock, spk
     roles = [
-        ("admin",      "dashboard"), ("admin",      "stock"),
+        ("admin",      "dashboard"), ("admin",      "stock"), ("admin", "gudang"),
         ("admin",      "barang-baru"), ("admin",    "riwayat"),
-        ("admin",      "pembelian"), ("admin",      "pembelian_permintaan"),
+        ("admin",      "pembelian"), ("admin",      "pembelian_pemasok"), ("admin", "pembelian_pemasok_edit"),
+        ("admin",      "pembelian_permintaan"),
         ("admin",      "pembelian_pembelian"), ("admin", "pembelian_penerimaan"),
         ("admin",      "pembelian_fpb"), ("admin", "penjualan"),
         ("admin",      "penjualan_penjualan"), ("admin", "penjualan_pengiriman"),
@@ -159,31 +333,47 @@ def init_db():
         ("admin",      "spk_standarisasi_harga"), ("admin", "spk_fifo"),
         ("admin",      "akuntansi"), ("admin", "audit"),
 
-        ("inventory",  "dashboard"), ("inventory",  "stock"),
+        # Semua modul operasional; Administrasi (users dan audit) dikecualikan.
+        ("akutansi",   "dashboard"), ("akutansi", "stock"), ("akutansi", "gudang"),
+        ("akutansi",   "barang-baru"), ("akutansi", "riwayat"),
+        ("akutansi",   "siinas"),
+        ("akutansi",   "pembelian"), ("akutansi", "pembelian_pemasok"), ("akutansi", "pembelian_permintaan"),
+        ("akutansi",   "pembelian_pembelian"), ("akutansi", "pembelian_penerimaan"),
+        ("akutansi",   "pembelian_fpb"),
+        ("akutansi",   "penjualan"), ("akutansi", "penjualan_penjualan"),
+        ("akutansi",   "penjualan_pengiriman"), ("akutansi", "penjualan_invoice"),
+        ("akutansi",   "spk"), ("akutansi", "spk_spk"),
+        ("akutansi",   "spk_monitoring"), ("akutansi", "spk_formula"),
+        ("akutansi",   "spk_monitoring_formula"), ("akutansi", "spk_spm"),
+        ("akutansi",   "spk_gp"), ("akutansi", "spk_biaya_produksi"),
+        ("akutansi",   "spk_standarisasi_harga"), ("akutansi", "spk_fifo"),
+        ("akutansi",   "akuntansi"),
+
+        ("inventory",  "dashboard"), ("inventory",  "stock"), ("inventory", "gudang"),
         ("inventory",  "barang-baru"), ("inventory","riwayat"),
         ("inventory",  "spk"), ("inventory", "spk_spk"),
         ("inventory",  "spk_formula"), ("inventory", "spk_spm"),
-        ("inventory",  "spk_gp"), ("inventory", "pembelian"),
+        ("inventory",  "spk_gp"), ("inventory", "pembelian"), ("inventory", "pembelian_pemasok"),
         ("inventory",  "pembelian_permintaan"), ("inventory", "pembelian_penerimaan"),
         ("inventory",  "penjualan"), ("inventory", "penjualan_pengiriman"),
 
-        ("purchasing", "dashboard"), ("purchasing", "stock"),
-        ("purchasing", "pembelian"), ("purchasing", "pembelian_permintaan"),
+        ("purchasing", "dashboard"), ("purchasing", "stock"), ("purchasing", "gudang"),
+        ("purchasing", "pembelian"), ("purchasing", "pembelian_pemasok"), ("purchasing", "pembelian_permintaan"),
         ("purchasing", "pembelian_pembelian"), ("purchasing", "pembelian_penerimaan"),
         ("purchasing", "pembelian_fpb"),
 
-        ("marketing",  "dashboard"), ("marketing",  "stock"),
+        ("marketing",  "dashboard"), ("marketing",  "stock"), ("marketing", "gudang"),
         ("marketing",  "penjualan"), ("marketing", "penjualan_penjualan"),
         ("marketing",  "spk"), ("marketing", "spk_formula"),
 
-        ("produksi",   "dashboard"), ("produksi",   "stock"),
+        ("produksi",   "dashboard"), ("produksi",   "stock"), ("produksi", "gudang"),
         ("produksi",   "spk"), ("produksi", "spk_spk"),
         ("produksi",   "spk_monitoring"), ("produksi", "spk_formula"),
         ("produksi",   "spk_monitoring_formula"), ("produksi", "spk_spm"),
         ("produksi",   "spk_gp"), ("produksi", "spk_biaya_produksi"),
         ("produksi",   "spk_standarisasi_harga"), ("produksi", "spk_fifo"),
 
-        ("ppc",        "dashboard"), ("ppc",        "stock"),
+        ("ppc",        "dashboard"), ("ppc",        "stock"), ("ppc", "gudang"),
         ("ppc",        "spk"), ("ppc", "spk_spk"),
         ("ppc",        "spk_monitoring"), ("ppc", "spk_formula"),
         ("ppc",        "spk_monitoring_formula"), ("ppc", "spk_spm"),
@@ -204,11 +394,11 @@ def init_db():
 
     con.commit()
     con.close()
-    print("Database user siap!")
+    print(f"Database user siap! ({DASHBOARD_DB_KIND})")
 
 
 def get_user(username):
-    con = sqlite3.connect(DB_PATH)
+    con = connect_dashboard_db()
     cur = con.cursor()
     cur.execute("SELECT id, username, password, name, role FROM users WHERE username = ?", (username,))
     row = cur.fetchone()
@@ -218,7 +408,7 @@ def get_user(username):
     return None
 
 def get_user_permissions(role):
-    con = sqlite3.connect(DB_PATH)
+    con = connect_dashboard_db()
     cur = con.cursor()
     cur.execute("SELECT module FROM roles WHERE role = ?", (role,))
     rows = cur.fetchall()
@@ -226,7 +416,7 @@ def get_user_permissions(role):
     return [r[0] for r in rows]
 
 def get_all_users():
-    con = sqlite3.connect(DB_PATH)
+    con = connect_dashboard_db()
     cur = con.cursor()
     cur.execute("SELECT id, username, name, role FROM users ORDER BY id")
     rows = cur.fetchall()
@@ -234,7 +424,7 @@ def get_all_users():
     return [{"id": r[0], "username": r[1], "name": r[2], "role": r[3]} for r in rows]
 
 def get_user_by_id(user_id):
-    con = sqlite3.connect(DB_PATH)
+    con = connect_dashboard_db()
     cur = con.cursor()
     cur.execute("SELECT id, username, name, role FROM users WHERE id = ?", (user_id,))
     row = cur.fetchone()
@@ -244,7 +434,7 @@ def get_user_by_id(user_id):
     return None
 
 def get_all_roles():
-    con = sqlite3.connect(DB_PATH)
+    con = connect_dashboard_db()
     cur = con.cursor()
     cur.execute("SELECT DISTINCT role FROM roles ORDER BY role")
     all_roles = [r[0] for r in cur.fetchall()]
@@ -256,7 +446,7 @@ def get_all_roles():
     return result
 
 def get_all_column_permissions():
-    con = sqlite3.connect(DB_PATH)
+    con = connect_dashboard_db()
     cur = con.cursor()
     cur.execute("""
         SELECT role, module, column_key
@@ -270,7 +460,7 @@ def get_all_column_permissions():
     return result
 
 def get_user_column_permissions(role):
-    con = sqlite3.connect(DB_PATH)
+    con = connect_dashboard_db()
     cur = con.cursor()
     cur.execute("""
         SELECT module, column_key
@@ -288,6 +478,8 @@ def upsert_role(role, modules, column_permissions=None):
     role = (role or "").strip().lower()
     clean_modules = sorted({(m or "").strip() for m in modules or [] if (m or "").strip()})
     module_parents = {
+        "pembelian_pemasok": "pembelian",
+        "pembelian_pemasok_edit": "pembelian",
         "pembelian_permintaan": "pembelian",
         "pembelian_pembelian": "pembelian",
         "pembelian_penerimaan": "pembelian",
@@ -309,7 +501,7 @@ def upsert_role(role, modules, column_permissions=None):
     if not role:
         return False, "Nama role wajib diisi"
 
-    con = sqlite3.connect(DB_PATH)
+    con = connect_dashboard_db()
     cur = con.cursor()
     try:
         cur.execute("DELETE FROM roles WHERE role = ?", (role,))
@@ -341,7 +533,7 @@ def delete_role(role):
     if role == "admin":
         return False, "Role admin tidak dapat dihapus"
 
-    con = sqlite3.connect(DB_PATH)
+    con = connect_dashboard_db()
     cur = con.cursor()
     try:
         cur.execute("SELECT COUNT(*) FROM users WHERE role = ?", (role,))
@@ -357,7 +549,7 @@ def delete_role(role):
         con.close()
 
 def create_user(username, password, name, role):
-    con = sqlite3.connect(DB_PATH)
+    con = connect_dashboard_db()
     cur = con.cursor()
     try:
         hashed = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
@@ -367,7 +559,8 @@ def create_user(username, password, name, role):
         )
         con.commit()
         return True, "User berhasil dibuat"
-    except sqlite3.IntegrityError:
+    except _integrity_error_types():
+        con.rollback()
         return False, "Username sudah dipakai"
     finally:
         con.close()
@@ -376,7 +569,7 @@ def update_user_password(user_id, password):
     if not password or len(password) < 6:
         return False, "Password minimal 6 karakter"
 
-    con = sqlite3.connect(DB_PATH)
+    con = connect_dashboard_db()
     cur = con.cursor()
     try:
         hashed = bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode()
@@ -389,7 +582,7 @@ def update_user_password(user_id, password):
         con.close()
 
 def delete_user(user_id):
-    con = sqlite3.connect(DB_PATH)
+    con = connect_dashboard_db()
     cur = con.cursor()
     cur.execute("DELETE FROM users WHERE id = ? AND username != 'admin'", (user_id,))
     deleted = cur.rowcount
@@ -399,7 +592,7 @@ def delete_user(user_id):
 
 def log_activity(username=None, name=None, role=None, action="", module=None,
                  description=None, metadata=None, ip_address=None, user_agent=None):
-    con = sqlite3.connect(DB_PATH)
+    con = connect_dashboard_db()
     cur = con.cursor()
     try:
       ensure_audit_table(cur)
@@ -419,7 +612,7 @@ def log_activity(username=None, name=None, role=None, action="", module=None,
       con.close()
 
 def get_audit_logs(search="", action="", module="", date_from=None, date_to=None, limit=100, offset=0):
-    con = sqlite3.connect(DB_PATH)
+    con = connect_dashboard_db()
     cur = con.cursor()
     ensure_audit_table(cur)
     conditions = ["1=1"]
@@ -483,7 +676,7 @@ def verify_password(plain, hashed):
 # ─── BARANG BARU LOG ─────────────────────────────────────────────────────────
 
 def save_barang_baru(item):
-    con = sqlite3.connect(DB_PATH)
+    con = connect_dashboard_db()
     cur = con.cursor()
     try:
         cur.execute("""
@@ -509,7 +702,7 @@ def save_barang_baru(item):
         con.close()
 
 def get_barang_baru_log(date_from=None, date_to=None):
-    con = sqlite3.connect(DB_PATH)
+    con = connect_dashboard_db()
     cur = con.cursor()
     conditions = ["1=1"]
     params = []
@@ -533,7 +726,7 @@ def get_barang_baru_log(date_from=None, date_to=None):
     } for r in rows]
 
 def get_max_logged_itemid():
-    con = sqlite3.connect(DB_PATH)
+    con = connect_dashboard_db()
     cur = con.cursor()
     cur.execute("SELECT MAX(itemid) FROM barang_baru_log")
     row = cur.fetchone()

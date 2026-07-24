@@ -55,6 +55,15 @@ const statusColor = status => {
 }
 
 const getCurrentMonthRange = () => [dayjs().startOf('month'), dayjs().endOf('month')]
+
+const getOrderReference = record => {
+  const orderNo = String(record?.no_pesanan || '').trim()
+  if (orderNo) return orderNo
+
+  const jobDescription = String(record?.deskripsi || record?.job_desc || '')
+  return /\b(?:stok|stock)\b/i.test(jobDescription) ? 'Stok' : 'Internal'
+}
+
 const SPK_EXPORT_COLS = [
   { key: 'no_spk', label: 'No Perintah Kerja' },
   { key: 'tanggal', label: 'Tanggal', type: 'date' },
@@ -188,7 +197,10 @@ export default function SPK() {
       if (dateRange[1]) params.date_to = dateRange[1].format('YYYY-MM-DD')
       if (status) params.status = status
       const res = await api.get('/api/spk/export', { params })
-      return res.data.data || []
+      return (res.data.data || []).map(row => ({
+        ...row,
+        no_pesanan: getOrderReference(row),
+      }))
     },
     columns: filterExportColumnsByPermission('spk', SPK_EXPORT_COLS, user),
     filename: 'DaftarSPK',
@@ -227,19 +239,18 @@ export default function SPK() {
   const buildPrintSection = (record, index, total) => {
     const materials = record.materials || []
     const productions = record.production_details || []
-    const materialRows = materials.map(item => {
-      const qtyDiff = item.spk_qty !== null && item.spk_qty !== undefined && item.spm_qty !== null && item.spm_qty !== undefined
-        ? Number(item.spm_qty || 0) - Number(item.spk_qty || 0)
-        : null
+    const materialRows = materials.map((item, materialIndex) => {
       return `
         <tr>
+          <td class="number-cell">${materialIndex + 1}</td>
           <td>${escapeHtml(item.material_no)}</td>
           <td>${escapeHtml(item.material_name)}</td>
           <td class="right">${item.formula_qty_for_spk_qty === null || item.formula_qty_for_spk_qty === undefined ? '-' : escapeHtml(formatQty(item.formula_qty_for_spk_qty))}</td>
           <td class="right">${escapeHtml(formatQty(item.spk_qty))}</td>
-          <td class="right">${escapeHtml(formatQty(item.spm_qty))}</td>
-          <td>${escapeHtml(item.unit || '')}</td>
-          <td class="right ${qtyDiff > 0 ? 'danger' : ''}">${qtyDiff === null ? '-' : `${qtyDiff > 0 ? '+' : ''}${escapeHtml(formatQty(qtyDiff))}`}</td>
+          <td class="actual-cell"></td>
+          <td class="actual-cell"></td>
+          <td class="actual-cell"></td>
+          <td class="actual-cell"></td>
           <td class="note-cell"></td>
         </tr>
       `
@@ -251,44 +262,72 @@ export default function SPK() {
         <td>${escapeHtml(item.category)}</td>
         <td class="right">${item.formula_qty_for_spk_qty === null || item.formula_qty_for_spk_qty === undefined ? '-' : escapeHtml(formatQty(item.formula_qty_for_spk_qty))}</td>
         <td class="right">${escapeHtml(formatQty(item.spk_qty))}</td>
+        <td class="actual-cell"></td>
         <td class="note-cell"></td>
+      </tr>
+    `).join('')
+    const manualProductionRows = Array.from({ length: 3 }, () => `
+      <tr class="manual-row">
+        <td></td>
+        <td></td>
+        <td></td>
+        <td></td>
+        <td></td>
+        <td></td>
+        <td></td>
       </tr>
     `).join('')
 
     return `
       <section>
-        <div class="grid">
-          <div class="cell"><div class="label">No SPK</div><div class="value">${escapeHtml(record.no_spk || '-')}</div></div>
-          <div class="cell"><div class="label">Tanggal</div><div class="value">${escapeHtml(record.tanggal ? dayjs(record.tanggal).format('DD/MM/YYYY') : '-')}</div></div>
-          <div class="cell"><div class="label">No Barang</div><div class="value">${escapeHtml(record.no_barang || '-')}</div></div>
-          <div class="cell"><div class="label">Qty SPK</div><div class="value">${escapeHtml(formatQty(record.qty_spk ?? record.qty))} ${escapeHtml(record.uom || '')}</div></div>
-          <div class="cell"><div class="label">Nama Barang</div><div class="value">${escapeHtml(record.nama_barang || '-')}</div></div>
-          <div class="cell"><div class="label">No Formula</div><div class="value">${escapeHtml(record.no_formula || '-')}</div></div>
-          <div class="cell"><div class="label">No Pesanan</div><div class="value">${escapeHtml(record.no_pesanan || '-')}</div></div>
-          <div class="cell"><div class="label">No PO</div><div class="value">${escapeHtml(record.no_po || '-')}</div></div>
-          <div class="cell"><div class="label">Status</div><div class="value">${escapeHtml(record.production_status || STATUS_MAP[record.status_barang]?.label || '-')}</div></div>
-          <div class="cell"><div class="label">Tgl Selesai</div><div class="value">${escapeHtml(record.tgl_selesai ? dayjs(record.tgl_selesai).format('DD/MM/YYYY') : '-')}</div></div>
+        <div class="spk-meta">
+          <div class="meta-column">
+            <div class="meta-row"><span class="meta-label">SPK No</span><span class="meta-separator">:</span><span class="meta-value">${escapeHtml(record.no_spk || '-')}</span></div>
+            <div class="meta-row"><span class="meta-label">Part No</span><span class="meta-separator">:</span><span class="meta-value">${escapeHtml(record.no_barang || '-')}</span></div>
+            <div class="meta-row"><span class="meta-label">Nama Barang</span><span class="meta-separator">:</span><span class="meta-value">${escapeHtml(record.nama_barang || '-')}</span></div>
+          </div>
+          <div class="meta-column meta-column-right">
+            <div class="meta-row"><span class="meta-label">Qty</span><span class="meta-separator">:</span><span class="meta-value">${escapeHtml(formatQty(record.qty_spk ?? record.qty))} ${escapeHtml(record.uom || '')}</span></div>
+            <div class="meta-row"><span class="meta-label">Tgl SPK</span><span class="meta-separator">:</span><span class="meta-value">${escapeHtml(record.tanggal ? dayjs(record.tanggal).format('DD/MM/YYYY') : '-')}</span></div>
+          </div>
         </div>
         <h2>Rincian Material Formula</h2>
         <table>
           <colgroup>
-            <col><col><col><col><col><col><col><col class="note-col">
+            <col class="number-col"><col><col><col><col><col><col><col><col><col class="note-col">
           </colgroup>
           <thead>
-            <tr><th>No Barang</th><th>Nama Material</th><th>Formula</th><th>SPK</th><th>SPM</th><th>UOM</th><th>Selisih SPM-SPK</th><th>Note</th></tr>
+            <tr><th>No</th><th>No Barang</th><th>Nama Material</th><th>Formula</th><th>SPK</th><th>Diserahkan</th><th>Dikembalikan</th><th>Digunakan</th><th>Selisih SPK-Aktual</th><th>Note</th></tr>
           </thead>
-          <tbody>${materialRows || '<tr><td colspan="8">Tidak ada data material</td></tr>'}</tbody>
+          <tbody>${materialRows || '<tr><td colspan="10">Tidak ada data material</td></tr>'}</tbody>
         </table>
         <h2>Rincian Biaya Produksi</h2>
         <table>
           <colgroup>
-            <col><col><col><col><col><col class="note-col">
+            <col><col><col><col><col><col><col class="note-col">
           </colgroup>
           <thead>
-            <tr><th>No Biaya</th><th>Deskripsi</th><th>Kategori</th><th>Formula</th><th>SPK</th><th>Note</th></tr>
+            <tr><th>No Biaya</th><th>Deskripsi</th><th>Kategori</th><th>Formula (Menit)</th><th>SPK (Menit)</th><th>Aktual (Menit)</th><th>Note</th></tr>
           </thead>
-          <tbody>${productionRows || '<tr><td colspan="6">Tidak ada data biaya produksi</td></tr>'}</tbody>
+          <tbody>${productionRows}${manualProductionRows}</tbody>
         </table>
+        <div class="approval-section">
+          <div class="approval-item">
+            <div class="approval-title">PIC Produksi</div>
+            <div class="approval-signature"></div>
+            <div class="approval-name">( ........................................ )</div>
+          </div>
+          <div class="approval-item">
+            <div class="approval-title">Inventory</div>
+            <div class="approval-signature"></div>
+            <div class="approval-name">( ........................................ )</div>
+          </div>
+          <div class="approval-item">
+            <div class="approval-title">PPC</div>
+            <div class="approval-signature"></div>
+            <div class="approval-name">( ........................................ )</div>
+          </div>
+        </div>
       </section>
       ${index < total - 1 ? '<div class="page-break"></div>' : ''}
     `
@@ -321,26 +360,47 @@ export default function SPK() {
               h1 { font-size: 20px; margin: 0 0 4px; }
               h2 { font-size: 14px; margin: 20px 0 8px; }
               .muted { color: #6b7280; }
-              .header { display: flex; justify-content: space-between; gap: 16px; border-bottom: 2px solid #111827; padding-bottom: 12px; margin-bottom: 14px; }
+              .header { position: relative; display: flex; justify-content: space-between; align-items: center; gap: 16px; border-bottom: 2px solid #111827; padding-bottom: 12px; margin-bottom: 14px; }
               .brand { display: flex; align-items: center; gap: 14px; }
               .brand-logo { width: 160px; height: 46px; object-fit: contain; object-position: left center; }
-              .grid { display: grid; grid-template-columns: repeat(5, 1fr); border: 1px solid #d1d5db; margin-bottom: 14px; }
-              .cell { padding: 8px; border-right: 1px solid #d1d5db; border-bottom: 1px solid #d1d5db; min-height: 42px; }
-              .cell:nth-child(5n) { border-right: 0; }
-              .label { color: #6b7280; font-size: 10px; margin-bottom: 3px; text-transform: uppercase; }
-              .value { font-weight: 700; }
+              .document-title { position: absolute; left: 50%; transform: translateX(-50%); width: max-content; text-align: center; }
+              .spk-meta { display: grid; grid-template-columns: minmax(0, 2fr) minmax(260px, 1fr); column-gap: 48px; margin: 4px 0 18px; }
+              .meta-column { display: flex; flex-direction: column; gap: 8px; }
+              .meta-row { display: grid; grid-template-columns: 92px 10px minmax(0, 1fr); align-items: start; line-height: 1.35; }
+              .meta-column-right .meta-row { grid-template-columns: 58px 10px minmax(0, 1fr); }
+              .meta-label, .meta-separator, .meta-value { font-weight: 700; }
+              .meta-label { white-space: nowrap; }
+              .meta-value { overflow-wrap: anywhere; }
               table { width: 100%; border-collapse: collapse; margin-bottom: 12px; page-break-inside: auto; }
               th, td { border: 1px solid #d1d5db; padding: 6px 7px; vertical-align: top; }
               th { background: #f3f4f6; text-align: left; font-size: 11px; }
               tr { page-break-inside: avoid; page-break-after: auto; }
               .right { text-align: right; white-space: nowrap; }
               .danger { color: #b91c1c; font-weight: 700; }
-              .note-col { width: 22%; }
-              .note-cell { min-width: 160px; }
+              .number-col { width: 34px; }
+              .number-cell { text-align: center; }
+              .actual-cell { min-width: 76px; height: 30px; }
+              .manual-row { height: 30px; }
+              .note-col { width: 18%; }
+              .note-cell { min-width: 130px; }
+              .approval-section { display: grid; grid-template-columns: repeat(3, 210px); justify-content: end; column-gap: 40px; margin: 28px 16px 8px 0; break-inside: avoid; page-break-inside: avoid; }
+              .approval-item { text-align: center; }
+              .approval-title { font-weight: 700; }
+              .approval-signature { height: 64px; }
+              .approval-name { white-space: nowrap; }
+              .print-timestamp { position: fixed; left: 50%; bottom: -9mm; transform: translateX(-50%); font-size: 8px; color: #111827; text-align: center; }
               .page-break { break-after: page; page-break-after: always; }
-              .page-footer { position: fixed; bottom: 0; right: 0; color: #6b7280; font-size: 10px; }
-              .page-footer::after { content: "Halaman " counter(page); }
-              @page { margin: 12mm; @bottom-right { content: "Halaman " counter(page); } }
+              @page {
+                size: A4 landscape;
+                margin: 12mm;
+                @bottom-right {
+                  content: "Halaman " counter(page);
+                  font-family: Arial, sans-serif;
+                  font-size: 8px;
+                  font-weight: 400;
+                  color: #6b7280;
+                }
+              }
               @media print { body { margin: 0; } .no-print { display: none; } }
             </style>
           </head>
@@ -348,15 +408,12 @@ export default function SPK() {
             <div class="header">
               <div class="brand">
                 <img class="brand-logo" src="/logo-gte-horizontal.jpg" alt="Grand Twins Engineering" />
-                <div>
-                  <h1>Surat Perintah Kerja</h1>
-                  <div class="muted">Dicetak ${escapeHtml(dayjs().format('DD/MM/YYYY HH:mm'))}</div>
-                </div>
               </div>
+              <h1 class="document-title">Pengeluaran Aktual Material</h1>
               <button class="no-print" onclick="window.print()">Print</button>
             </div>
             ${sections}
-            <div class="page-footer"></div>
+            <div class="print-timestamp">${escapeHtml(dayjs().format('DD/MM/YYYY HH:mm'))}</div>
             <script>window.onload = () => window.print()</script>
           </body>
         </html>
@@ -431,11 +488,18 @@ export default function SPK() {
       dataIndex: 'no_pesanan',
       key: 'no_pesanan',
       width: 155,
-      render: val => {
-        if (!val) return <Text type="secondary" style={{ fontSize: 11 }}>Internal</Text>
+      render: (val, record) => {
+        const reference = getOrderReference(record)
+        if (!val) {
+          return (
+            <Text type="secondary" style={{ fontSize: 11 }}>
+              {reference}
+            </Text>
+          )
+        }
         return (
           <Tag color="geekblue" style={{ fontWeight: 600, fontSize: 11 }}>
-            {val}
+            {reference}
           </Tag>
         )
       },

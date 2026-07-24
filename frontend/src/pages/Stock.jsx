@@ -509,7 +509,7 @@ export default function Stock() {
         </Col>
       </Row>
 
-    <Card title="📦 Stok Barang" extra={
+    <Card className="stock-page-card" title="📦 Stok Barang" extra={
       <Space wrap>
         <Select
           mode="multiple"
@@ -554,7 +554,7 @@ export default function Stock() {
       </Space>
     }>
       <Table
-        sticky={{ offsetHeader: 64 }}
+        className="stock-page-table"
         rowKey="itemno"
         columns={visibleColumns}
         dataSource={tableRows}

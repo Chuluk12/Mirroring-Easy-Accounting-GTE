@@ -184,6 +184,14 @@ Invoke-RestMethod `
   -Headers $headers
 ```
 
+Tes FIFO:
+
+```powershell
+Invoke-RestMethod `
+  -Uri "http://127.0.0.1:5000/api/integration/v1/fifo?limit=20&search=ACB-SS4X-00.50" `
+  -Headers $headers
+```
+
 ## Checklist sebelum Calculator dihubungkan
 
 - Easy Dashboard backend berjalan stabil dan otomatis hidup setelah restart.

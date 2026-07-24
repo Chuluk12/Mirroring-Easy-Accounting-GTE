@@ -14,32 +14,72 @@ Cara pakai:
     3. Set MODE = "delete" untuk benar-benar hapus
 """
 
+import os
+import sys
+from pathlib import Path
+
 import fdb
+import openpyxl
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 # ─── KONFIGURASI ─────────────────────────────────────────────────────────────
 
 fdb.load_api("C:/Program Files/Firebird/Firebird_3_0/fbclient.dll")
 
+ENV_FILE = Path(__file__).with_name(".env")
+
+def muat_env(file_path):
+    """Muat konfigurasi sederhana dari .env tanpa menimpa environment aktif."""
+    if not file_path.exists():
+        return
+
+    for baris in file_path.read_text(encoding="utf-8").splitlines():
+        baris = baris.strip()
+        if not baris or baris.startswith("#") or "=" not in baris:
+            continue
+        nama, nilai = baris.split("=", 1)
+        os.environ.setdefault(nama.strip(), nilai.strip())
+
+muat_env(ENV_FILE)
+
 DB_CONFIG = {
-    "host": "127.0.0.1",
-    "port": 3999,
-    "database": "D:/EASY/GTE.EASY6",
-    "user": "SYSDBA",
-    "password": "NewPassword123"
+    "host": os.getenv("EASY_DB_HOST", "192.168.10.5"),
+    "port": int(os.getenv("EASY_DB_PORT", "3999")),
+    "database": os.getenv("EASY_DB_PATH", "E:/EASY/GTE.EASY6"),
+    "user": os.getenv("EASY_DB_USER", "SYSDBA"),
+    "password": os.getenv("EASY_DB_PASSWORD", "NewPassword123"),
 }
 
 # ─── ISI KODE BARANG YANG INGIN DIHAPUS ──────────────────────────────────────
 # Contoh: ["TEST1", "TEST2", "TEST3"]
 # Atau bisa dibaca dari file txt: open("kode_barang.txt").read().splitlines()
 
-KODE_BARANG_YANG_DIHAPUS = [
-    "TEST1",
-    "TEST2",
-    "TEST3",
-    "TEST4",
-    "TEST5",
-    # tambahkan kode barang lain di sini
-]
+FILE_KODE_BARANG = Path(r"C:\Users\HUSNUL\Documents\HasilBarang.xlsx")
+KODE_BARANG_DIABAIKAN = {
+    "GTE2600AI-6.00-M08",
+}
+
+def baca_kode_barang_excel(file_path):
+    """Baca kode barang dari kolom pertama, dengan baris pertama sebagai header."""
+    workbook = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
+    worksheet = workbook[workbook.sheetnames[0]]
+    kode_list = []
+    kode_terlihat = set()
+
+    for row in worksheet.iter_rows(min_row=2, values_only=True):
+        kode = str(row[0]).strip() if row and row[0] is not None else ""
+        if kode and kode not in KODE_BARANG_DIABAIKAN and kode not in kode_terlihat:
+            kode_list.append(kode)
+            kode_terlihat.add(kode)
+
+    workbook.close()
+    return kode_list
+
+KODE_BARANG_YANG_DIHAPUS = baca_kode_barang_excel(FILE_KODE_BARANG)
 
 # "preview" = hanya lihat, tidak hapus
 # "delete"  = benar-benar hapus (pastikan sudah preview dulu!)
@@ -50,6 +90,11 @@ MODE = "delete"
 def cek_transaksi(cur, itemno):
     """Cek apakah barang sudah punya transaksi di ITEMHIST."""
     cur.execute("SELECT COUNT(*) FROM ITEMHIST WHERE ITEMNO = ?", (itemno,))
+    return cur.fetchone()[0]
+
+def cek_referensi_bom(cur, itemno):
+    """Cek jumlah formula BOM yang masih mereferensikan barang."""
+    cur.execute("SELECT COUNT(*) FROM BOM WHERE ITEMNO = ?", (itemno,))
     return cur.fetchone()[0]
 
 def preview(con, kode_list):
@@ -75,10 +120,14 @@ def preview(con, kode_list):
             continue
 
         jumlah_tx = cek_transaksi(cur, itemno)
+        jumlah_bom = cek_referensi_bom(cur, itemno)
         desc = str(row[1] or "").strip()[:33]
 
         if jumlah_tx > 0:
             print(f"{i:<5} {itemno:<30} {desc:<35} {jumlah_tx:<10} ⚠️  Ada transaksi — SKIP")
+            tidak_bisa.append(itemno)
+        elif jumlah_bom > 0:
+            print(f"{i:<5} {itemno:<30} {desc:<35} {jumlah_tx:<10} Dipakai {jumlah_bom} BOM - SKIP")
             tidak_bisa.append(itemno)
         else:
             print(f"{i:<5} {itemno:<30} {desc:<35} {jumlah_tx:<10} ✅ Bisa dihapus")
@@ -112,6 +161,12 @@ def delete_barang(con, kode_list):
         jumlah_tx = cek_transaksi(cur, itemno)
         if jumlah_tx > 0:
             print(f"⚠️  {itemno} — ada {jumlah_tx} transaksi, skip (tidak dihapus)")
+            gagal.append(itemno)
+            continue
+
+        jumlah_bom = cek_referensi_bom(cur, itemno)
+        if jumlah_bom > 0:
+            print(f"{itemno} - dipakai {jumlah_bom} formula BOM, skip (tidak dihapus)")
             gagal.append(itemno)
             continue
 

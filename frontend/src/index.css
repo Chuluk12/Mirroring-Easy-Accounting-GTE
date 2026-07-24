@@ -433,6 +433,25 @@ select {
   box-shadow: inset -8px 0 8px -8px rgba(25, 31, 51, 0.18) !important;
 }
 
+.stock-page-card .ant-card-body {
+  padding-top: 12px;
+}
+
+.stock-page-table .ant-table-container,
+.stock-page-table .ant-table-content {
+  overflow-x: auto !important;
+  overflow-y: visible !important;
+}
+
+.stock-page-table .ant-table-thead > tr > th {
+  position: static !important;
+  top: auto !important;
+}
+
+.stock-page-table .ant-table-cell {
+  vertical-align: top;
+}
+
 .sales-freeze-table .ant-table-thead > tr > th:nth-child(1),
 .sales-freeze-table .ant-table-tbody > tr > td:nth-child(1) {
   position: sticky !important;
