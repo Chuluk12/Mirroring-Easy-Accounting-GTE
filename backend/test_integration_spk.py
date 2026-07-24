@@ -5,9 +5,18 @@ from unittest.mock import patch
 from flask import Flask
 
 import integration_api
+import server
 
 
 class SpkIntegrationTest(unittest.TestCase):
+    def test_monitoring_formula_filters_exact_spk(self):
+        where_sql, params = server._monitoring_formula_where_clause(
+            no_spk="GTE-SPK-261661"
+        )
+
+        self.assertIn("w.WONO = ?", where_sql)
+        self.assertEqual(params, ["GTE-SPK-261661"])
+
     @patch.object(integration_api, "_internal_get")
     def test_list_skips_global_count(self, internal_get):
         internal_get.return_value = (200, {

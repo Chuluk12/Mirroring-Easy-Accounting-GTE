@@ -8639,7 +8639,7 @@ def api_standarisasi_harga_details(standar_id):
         return jsonify({"data": [], "total": 0, "error": str(e)}), 500
 
 
-def _monitoring_formula_where_clause(search="", date_from="", date_to="", wodet_id=""):
+def _monitoring_formula_where_clause(search="", date_from="", date_to="", wodet_id="", no_spk=""):
     conditions = ["1=1"]
     params = []
 
@@ -8665,6 +8665,10 @@ def _monitoring_formula_where_clause(search="", date_from="", date_to="", wodet_
     if wodet_id:
         conditions.append("det.ID = ?")
         params.append(int(wodet_id))
+
+    if no_spk:
+        conditions.append("w.WONO = ?")
+        params.append(no_spk)
 
     return " AND ".join(conditions), params
 
@@ -9539,6 +9543,7 @@ def api_monitoring_formula():
         date_to = request.args.get("date_to", "")
         status = request.args.get("status", "").strip()
         wodet_id_filter = request.args.get("wodet_id", "").strip()
+        no_spk_filter = request.args.get("no_spk", "").strip()
         offset = int(request.args.get("offset", 0))
         requested_limit = int(request.args.get("limit", 10))
         qty_only = request.args.get("qty_only", "").lower() in ("1", "true", "yes")
@@ -9550,7 +9555,9 @@ def api_monitoring_formula():
 
         con = fdb.connect(**DB_CONFIG)
         cur = con.cursor()
-        where_sql, params_where = _monitoring_formula_where_clause(search, date_from, date_to, wodet_id_filter)
+        where_sql, params_where = _monitoring_formula_where_clause(
+            search, date_from, date_to, wodet_id_filter, no_spk_filter
+        )
         wodet_columns = set(_get_table_columns(cur, "WODET"))
         def _truthy_sql_expr(alias, column):
             return f"UPPER(TRIM(CAST({alias}.{column} AS VARCHAR(20)))) NOT IN ('', '0', 'N', 'NO', 'F', 'FALSE')"
