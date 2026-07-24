@@ -9549,7 +9549,7 @@ def api_monitoring_formula():
         qty_only = request.args.get("qty_only", "").lower() in ("1", "true", "yes")
         include_wip = request.args.get("include_wip", "").lower() in ("1", "true", "yes")
         skip_count = request.args.get("skip_count", "").lower() in ("1", "true", "yes")
-        max_limit = 50 if skip_count else 10
+        max_limit = 500 if no_spk_filter else (50 if skip_count else 10)
         limit = max(1, min(requested_limit, max_limit)) if not search else max(1, requested_limit)
         query_limit = limit + 1 if skip_count else limit
 
