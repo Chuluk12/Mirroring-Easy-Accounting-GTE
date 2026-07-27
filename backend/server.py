@@ -6414,6 +6414,12 @@ def api_pembelian():
         status    = request.args.get("status", "")
         offset    = int(request.args.get("offset", 0))
         limit     = int(request.args.get("limit", 50))
+        for name, value in (("date_from", date_from), ("date_to", date_to)):
+            if value:
+                try:
+                    datetime.strptime(value, "%Y-%m-%d")
+                except ValueError:
+                    return jsonify({"data": [], "total": 0, "error": f"{name} harus format YYYY-MM-DD dan tanggal valid"}), 400
         con = fdb.connect(**DB_CONFIG)
         cur = con.cursor()
         conditions   = ["1=1"]
@@ -6430,6 +6436,15 @@ def api_pembelian():
         if date_to:
             conditions.append("po.PODATE <= ?"); params_where.append(date_to)
         where_sql = " AND ".join(conditions)
+        cur.execute(f"""
+            SELECT COUNT(*)
+            FROM PO po
+            LEFT JOIN PERSONDATA pd ON pd.ID = po.VENDORID
+            LEFT JOIN PODET det     ON det.POID = po.POID
+            LEFT JOIN REQUISITION rq ON rq.REQID = det.REQID
+            WHERE {where_sql}
+        """, params_where)
+        total = int(cur.fetchone()[0] or 0)
         cur.execute(f"""
             SELECT FIRST ? SKIP ?
                 po.PONO, po.PODATE, po.EXPECTED,
@@ -6466,7 +6481,7 @@ def api_pembelian():
                 "ppn_kode": str(row[12] or "").strip(), "ppn_rate": tax_rate,
                 "ppn_amount": round(ppn_amt, 2), "amount": round(subtotal + ppn_amt, 2),
             })
-        return jsonify({"data": filter_record_columns("pembelian", data), "total": len(data)})
+        return jsonify({"data": filter_record_columns("pembelian", data), "total": total})
     except Exception as e:
         print(f"Error api_pembelian: {e}")
         return jsonify({"data": [], "total": 0, "error": str(e)})

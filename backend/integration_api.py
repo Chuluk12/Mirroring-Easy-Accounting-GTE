@@ -20,6 +20,7 @@ except ImportError:
 API_PREFIX = "/api/integration/v1"
 COMMON_PARAMS = {
     "offset", "limit", "page", "search", "columns", "sort_by", "sort_order",
+    "sortby", "sort",
     "date_from", "date_to", "created_from", "created_to",
 }
 ALLOWED_PARAMS = {
@@ -40,6 +41,7 @@ ALLOWED_PARAMS = {
     "biaya-produksi": {"search", "account", "status"},
     "standarisasi-harga": {"search", "status", "date_from", "date_to"},
     "fifo": {"search", "columns", "date_from", "date_to"},
+    "pembelian": {"search", "date_from", "date_to"},
 }
 _RATE_BUCKETS = defaultdict(deque)
 _RATE_LOCK = threading.Lock()
@@ -292,10 +294,14 @@ def _filter_search_rows(rows):
 
 
 def _sort_rows(rows):
-    sort_by = str(request.args.get("sort_by", "") or "").strip()
+    sort_by = str(
+        request.args.get("sort_by", "") or request.args.get("sortby", "") or ""
+    ).strip()
     if not sort_by:
         return rows
-    reverse = str(request.args.get("sort_order", "") or "").strip().lower() in {"desc", "descend", "descending"}
+    reverse = str(
+        request.args.get("sort_order", "") or request.args.get("sort", "") or ""
+    ).strip().lower() in {"desc", "descend", "descending"}
 
     def sort_value(row):
         value = row.get(sort_by) if isinstance(row, dict) else ""
@@ -391,6 +397,9 @@ def _error_response(resource, status_code, upstream):
     if status_code == 404:
         message = upstream.get("message") or "Data tidak ditemukan"
         code = "not_found"
+    elif status_code == 400:
+        message = upstream.get("error") or upstream.get("message") or "Parameter request tidak valid"
+        code = "invalid_parameters"
     elif status_code in {401, 403}:
         message = "Akses ke sumber data ditolak"
         code = "upstream_access_denied"
@@ -659,6 +668,10 @@ def register_integration_api(app):
     @blueprint.get("/fifo")
     def fifo():
         return list_resource("fifo", "/api/fifo")
+
+    @blueprint.get("/pembelian")
+    def pembelian():
+        return list_resource("pembelian", "/api/pembelian")
 
     @blueprint.get("/standarisasi-harga/<int:standar_id>/details")
     def standarisasi_harga_details(standar_id):
