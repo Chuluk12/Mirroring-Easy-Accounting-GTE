@@ -266,8 +266,11 @@ export default function SPK() {
         <td class="note-cell"></td>
       </tr>
     `).join('')
-    const manualProductionRows = Array.from({ length: 3 }, () => `
+    const manualMaterialRows = Array.from({ length: 3 }, () => `
       <tr class="manual-row">
+        <td></td>
+        <td></td>
+        <td></td>
         <td></td>
         <td></td>
         <td></td>
@@ -299,7 +302,7 @@ export default function SPK() {
           <thead>
             <tr><th>No</th><th>No Barang</th><th>Nama Material</th><th>Formula</th><th>SPK</th><th>Diserahkan</th><th>Dikembalikan</th><th>Digunakan</th><th>Selisih SPK-Aktual</th><th>Note</th></tr>
           </thead>
-          <tbody>${materialRows || '<tr><td colspan="10">Tidak ada data material</td></tr>'}</tbody>
+          <tbody>${materialRows || '<tr><td colspan="10">Tidak ada data material</td></tr>'}${manualMaterialRows}</tbody>
         </table>
         <h2>Rincian Biaya Produksi</h2>
         <table>
@@ -309,7 +312,7 @@ export default function SPK() {
           <thead>
             <tr><th>No Biaya</th><th>Deskripsi</th><th>Kategori</th><th>Formula (Menit)</th><th>SPK (Menit)</th><th>Aktual (Menit)</th><th>Note</th></tr>
           </thead>
-          <tbody>${productionRows}${manualProductionRows}</tbody>
+          <tbody>${productionRows || '<tr><td colspan="7">Tidak ada data biaya produksi</td></tr>'}</tbody>
         </table>
         <div class="approval-section">
           <div class="approval-item">
@@ -388,11 +391,17 @@ export default function SPK() {
               .approval-title { font-weight: 700; }
               .approval-signature { height: 64px; }
               .approval-name { white-space: nowrap; }
-              .print-timestamp { position: fixed; left: 50%; bottom: -9mm; transform: translateX(-50%); font-size: 8px; color: #111827; text-align: center; }
               .page-break { break-after: page; page-break-after: always; }
               @page {
                 size: A4 landscape;
                 margin: 12mm;
+                @bottom-center {
+                  content: "${escapeHtml(dayjs().format('DD/MM/YYYY HH:mm'))}";
+                  font-family: Arial, sans-serif;
+                  font-size: 8px;
+                  font-weight: 400;
+                  color: #111827;
+                }
                 @bottom-right {
                   content: "Halaman " counter(page);
                   font-family: Arial, sans-serif;
@@ -413,7 +422,6 @@ export default function SPK() {
               <button class="no-print" onclick="window.print()">Print</button>
             </div>
             ${sections}
-            <div class="print-timestamp">${escapeHtml(dayjs().format('DD/MM/YYYY HH:mm'))}</div>
             <script>window.onload = () => window.print()</script>
           </body>
         </html>
