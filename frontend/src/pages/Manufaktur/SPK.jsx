@@ -300,7 +300,7 @@ export default function SPK() {
             <col class="number-col"><col><col><col><col><col><col><col><col><col class="note-col">
           </colgroup>
           <thead>
-            <tr><th>No</th><th>No Barang</th><th>Nama Material</th><th>Formula</th><th>SPK</th><th>Diserahkan</th><th>Dikembalikan</th><th>Digunakan</th><th>Selisih SPK-Aktual</th><th>Note</th></tr>
+            <tr><th>No</th><th>No Barang</th><th>Nama Material</th><th>Formula</th><th>SPK</th><th>Diambil</th><th>Dikembalikan</th><th>Digunakan</th><th>Selisih SPK-Aktual</th><th>Note</th></tr>
           </thead>
           <tbody>${materialRows || '<tr><td colspan="10">Tidak ada data material</td></tr>'}${manualMaterialRows}</tbody>
         </table>
@@ -310,7 +310,7 @@ export default function SPK() {
             <col><col><col><col><col><col><col class="note-col">
           </colgroup>
           <thead>
-            <tr><th>No Biaya</th><th>Deskripsi</th><th>Kategori</th><th>Formula (Menit)</th><th>SPK (Menit)</th><th>Aktual (Menit)</th><th>Note</th></tr>
+            <tr><th>No Biaya</th><th>Deskripsi</th><th>Kategori</th><th>Formula</th><th>SPK</th><th>Aktual</th><th>Note</th></tr>
           </thead>
           <tbody>${productionRows || '<tr><td colspan="7">Tidak ada data biaya produksi</td></tr>'}</tbody>
         </table>
