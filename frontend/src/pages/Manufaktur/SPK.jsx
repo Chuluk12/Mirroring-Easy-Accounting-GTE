@@ -418,7 +418,7 @@ export default function SPK() {
               <div class="brand">
                 <img class="brand-logo" src="/logo-gte-horizontal.jpg" alt="Grand Twins Engineering" />
               </div>
-              <h1 class="document-title">Pengeluaran Aktual Material</h1>
+              <h1 class="document-title">Form Aktual Penggunaan Material</h1>
               <button class="no-print" onclick="window.print()">Print</button>
             </div>
             ${sections}
