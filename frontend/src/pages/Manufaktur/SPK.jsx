@@ -1,11 +1,11 @@
 import { useEffect, useState, useCallback } from 'react'
 import {
-  Table, Input, Card, DatePicker, Space, Tag, Tooltip, Select,
+  Table, Input, Card, DatePicker, Space, Tag, Tooltip, Popover, Select,
   Statistic, Row, Col, Typography, Button, Badge, Progress, Modal, Checkbox, message
 } from 'antd'
 import {
   FileExcelOutlined, SearchOutlined, ReloadOutlined, ToolOutlined,
-  CheckCircleOutlined, ClockCircleOutlined, PrinterOutlined
+  CheckCircleOutlined, ClockCircleOutlined, PrinterOutlined, HistoryOutlined
 } from '@ant-design/icons'
 import api from '../../api/client'
 import { exportRowsToXLS } from '../../utils/exportXls'
@@ -662,11 +662,62 @@ export default function SPK() {
   ]
 
   const formulaMaterialColumns = [
-    { title: 'No Barang Formula', dataIndex: 'material_no', width: 170, fixed: 'left', render: v => <Text code>{v || '-'}</Text> },
-    { title: 'Nama Material', dataIndex: 'material_name', width: 280, ellipsis: { showTitle: false }, render: v => <Tooltip title={v}><span>{v || '-'}</span></Tooltip> },
+    {
+      title: 'No. Barang Formula',
+      dataIndex: 'material_no',
+      width: 170,
+      ellipsis: { showTitle: false },
+      render: v => (
+        <Tooltip title={v}>
+          <Text code className="spk-formula-cell-ellipsis">{v || '-'}</Text>
+        </Tooltip>
+      ),
+    },
+    {
+      title: 'Nama Material',
+      dataIndex: 'material_name',
+      width: 280,
+      ellipsis: { showTitle: false },
+      render: v => (
+        <Tooltip title={v}>
+          <span className="spk-formula-cell-ellipsis">{v || '-'}</span>
+        </Tooltip>
+      ),
+    },
     { title: 'Qty Formula', dataIndex: 'formula_qty', width: 120, align: 'right', render: (v, rec) => formatQtyWithUnit(v, rec.unit) },
     { title: 'Qty Formula x Qty SPK', dataIndex: 'formula_qty_for_spk_qty', width: 170, align: 'right', render: (v, rec) => formatQtyWithUnit(v, rec.unit) },
     { title: 'Qty di SPK', dataIndex: 'spk_qty', width: 120, align: 'right', render: (v, rec) => formatQtyWithUnit(v, rec.unit) },
+    {
+      title: 'Qty Sebelumnya',
+      dataIndex: 'previous_spk_qty',
+      width: 150,
+      align: 'right',
+      render: (v, rec) => {
+        const history = rec.spk_qty_history || []
+        if (v === null || v === undefined) return <Text type="secondary">-</Text>
+        const content = (
+          <div className="spk-qty-history">
+            {history.map((item, index) => (
+              <div className="spk-qty-history-row" key={`${item.detected_at}-${index}`}>
+                <Text type="secondary">{dayjs(item.detected_at).format('DD/MM/YYYY HH:mm')}</Text>
+                <Text>
+                  {item.old_qty === null || item.old_qty === undefined
+                    ? `Baseline ${formatQtyWithUnit(item.new_qty, item.unit)}`
+                    : `${formatQty(item.old_qty)} → ${formatQtyWithUnit(item.new_qty, item.unit)}`}
+                </Text>
+              </div>
+            ))}
+          </div>
+        )
+        return (
+          <Popover title="Riwayat Qty di SPK" content={content} trigger="click" placement="left">
+            <Button type="link" size="small" icon={<HistoryOutlined />} className="spk-qty-history-button">
+              {formatQtyWithUnit(v, rec.unit)}
+            </Button>
+          </Popover>
+        )
+      },
+    },
     { title: 'Qty di SPM', dataIndex: 'spm_qty', width: 120, align: 'right', render: (v, rec) => formatQtyWithUnit(v, rec.unit) },
     {
       title: 'Selisih SPM-SPK',

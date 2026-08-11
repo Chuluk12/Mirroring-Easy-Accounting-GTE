@@ -521,7 +521,7 @@ select {
 }
 
 .spk-formula-material-table {
-  width: 1685px;
+  width: 1835px;
 }
 
 .spk-formula-production-table {
@@ -546,6 +546,34 @@ select {
 
 .spk-formula-detail-table .ant-table-tbody > tr:hover > td {
   background: #f8fbff !important;
+}
+
+.spk-formula-cell-ellipsis {
+  display: block;
+  width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.spk-qty-history {
+  display: grid;
+  gap: 8px;
+  min-width: 260px;
+  max-height: 280px;
+  overflow-y: auto;
+}
+
+.spk-qty-history-row {
+  display: grid;
+  gap: 2px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #eef2f8;
+}
+
+.spk-qty-history-button {
+  height: auto;
+  padding: 0;
 }
 
 .ant-input,

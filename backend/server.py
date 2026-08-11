@@ -8856,6 +8856,99 @@ def _build_in_clause(values):
     return ",".join(["?"] * len(values))
 
 
+def _record_spk_material_qty_snapshots(material_maps, include_history=True):
+    """Record a baseline/change only after Easy returns a valid SPK material row."""
+    observed_at = datetime.now().isoformat(timespec="seconds")
+    snapshot_data = {}
+    dashboard_con = connect_dashboard_db()
+    try:
+        dashboard_cur = dashboard_con.cursor()
+        for wodet_id, maps in material_maps.items():
+            for material_no, material in maps.get("spk_map", {}).items():
+                qty = float(material.get("qty") or 0)
+                unit = str(material.get("unit") or "").strip()
+                dashboard_cur.execute("""
+                    INSERT OR IGNORE INTO spk_material_qty_snapshots
+                    (wodet_id, material_no, current_qty, previous_qty, unit,
+                     first_seen_at, last_seen_at, changed_at)
+                    VALUES (?, ?, ?, NULL, ?, ?, ?, NULL)
+                """, [wodet_id, material_no, qty, unit, observed_at, observed_at])
+                inserted = dashboard_cur.rowcount > 0
+                if inserted:
+                    dashboard_cur.execute("""
+                        INSERT INTO spk_material_qty_history
+                        (wodet_id, material_no, old_qty, new_qty, unit, detected_at)
+                        VALUES (?, ?, NULL, ?, ?, ?)
+                    """, [wodet_id, material_no, qty, unit, observed_at])
+                else:
+                    dashboard_cur.execute("""
+                        SELECT current_qty
+                        FROM spk_material_qty_snapshots
+                        WHERE wodet_id = ? AND material_no = ?
+                    """, [wodet_id, material_no])
+                    current_row = dashboard_cur.fetchone()
+                    old_qty = float(current_row[0] or 0) if current_row else qty
+                    if not _qty_match(old_qty, qty):
+                        dashboard_cur.execute("""
+                            UPDATE spk_material_qty_snapshots
+                            SET previous_qty = current_qty,
+                                current_qty = ?, unit = ?, last_seen_at = ?, changed_at = ?
+                            WHERE wodet_id = ? AND material_no = ?
+                              AND ABS(current_qty - ?) <= 0.0001
+                        """, [qty, unit, observed_at, observed_at, wodet_id, material_no, old_qty])
+                        if dashboard_cur.rowcount > 0:
+                            dashboard_cur.execute("""
+                                INSERT INTO spk_material_qty_history
+                                (wodet_id, material_no, old_qty, new_qty, unit, detected_at)
+                                VALUES (?, ?, ?, ?, ?, ?)
+                            """, [wodet_id, material_no, old_qty, qty, unit, observed_at])
+                    else:
+                        dashboard_cur.execute("""
+                            UPDATE spk_material_qty_snapshots
+                            SET unit = ?, last_seen_at = ?
+                            WHERE wodet_id = ? AND material_no = ?
+                        """, [unit, observed_at, wodet_id, material_no])
+
+                if not include_history:
+                    continue
+
+                dashboard_cur.execute("""
+                    SELECT current_qty, previous_qty, changed_at
+                    FROM spk_material_qty_snapshots
+                    WHERE wodet_id = ? AND material_no = ?
+                """, [wodet_id, material_no])
+                state = dashboard_cur.fetchone()
+                dashboard_cur.execute("""
+                    SELECT old_qty, new_qty, unit, detected_at
+                    FROM spk_material_qty_history
+                    WHERE wodet_id = ? AND material_no = ?
+                    ORDER BY detected_at DESC, id DESC
+                    LIMIT 50
+                """, [wodet_id, material_no])
+                history = [
+                    {
+                        "old_qty": row[0],
+                        "new_qty": row[1],
+                        "unit": row[2] or "",
+                        "detected_at": row[3],
+                    }
+                    for row in dashboard_cur.fetchall()
+                ]
+                snapshot_data[(int(wodet_id), material_no)] = {
+                    "current_qty": state[0] if state else qty,
+                    "previous_qty": state[1] if state else None,
+                    "changed_at": state[2] if state else None,
+                    "history": history,
+                }
+        dashboard_con.commit()
+        return snapshot_data
+    except Exception:
+        dashboard_con.rollback()
+        raise
+    finally:
+        dashboard_con.close()
+
+
 def _fetch_material_maps_batch(cur, work_rows):
     result = {
         row["wodet_id"]: {
@@ -9794,6 +9887,11 @@ def api_monitoring_formula():
                 })
 
         material_maps = _fetch_material_maps_batch(cur, work_rows)
+        try:
+            material_qty_snapshots = _record_spk_material_qty_snapshots(material_maps)
+        except Exception as snapshot_error:
+            app.logger.exception("Gagal mencatat riwayat Qty material SPK: %s", snapshot_error)
+            material_qty_snapshots = {}
         data = []
         for row in work_rows:
             wodet_id = row["wodet_id"]
@@ -9847,12 +9945,16 @@ def api_monitoring_formula():
                     float(formula.get("qty") or 0) * (float(row["qty_spk"] or 0) / float(maps.get("qty_build") or 1))
                 ) if formula else None
                 spk_cost_value = float(spk.get("cost") or 0) if spk else None
+                qty_snapshot = material_qty_snapshots.get((wodet_id, material_no), {})
                 materials.append({
                     "material_no": material_no,
                     "material_name": info.get("name", ""),
                     "formula_qty": formula_qty,
                     "formula_qty_for_spk_qty": formula_qty_for_spk_qty,
                     "spk_qty": spk_qty,
+                    "previous_spk_qty": qty_snapshot.get("previous_qty"),
+                    "spk_qty_changed_at": qty_snapshot.get("changed_at"),
+                    "spk_qty_history": qty_snapshot.get("history", []),
                     "spm_qty": spm_qty,
                     "formula_cost": float(formula.get("cost") or 0) if formula else None,
                     "formula_cost_for_spk_qty": formula_cost_for_spk_qty,
@@ -10187,6 +10289,29 @@ def api_spk():
         has_more = skip_count and len(rows) > limit
         if has_more:
             rows = rows[:limit]
+
+        visible_wodet_ids = sorted({int(row[0] or 0) for row in rows if row[0]})
+        if visible_wodet_ids:
+            cur.execute(f"""
+                SELECT w.WODETID, w.ITEMNO, SUM(w.QUANTITY), MAX(w.UNIT)
+                FROM WODETMAT w
+                WHERE w.WODETID IN ({_build_in_clause(visible_wodet_ids)})
+                GROUP BY w.WODETID, w.ITEMNO
+            """, visible_wodet_ids)
+            polling_material_maps = {}
+            for material_row in cur.fetchall():
+                target_id = int(material_row[0] or 0)
+                material_no = str(material_row[1] or "").strip()
+                if not target_id or not material_no:
+                    continue
+                polling_material_maps.setdefault(target_id, {"spk_map": {}})["spk_map"][material_no] = {
+                    "qty": float(material_row[2] or 0),
+                    "unit": str(material_row[3] or "").strip(),
+                }
+            try:
+                _record_spk_material_qty_snapshots(polling_material_maps, include_history=False)
+            except Exception as snapshot_error:
+                app.logger.exception("Gagal polling riwayat Qty material SPK: %s", snapshot_error)
         con.close()
 
         data = []

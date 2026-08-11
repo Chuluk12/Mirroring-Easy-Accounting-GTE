@@ -20,6 +20,13 @@ TABLES = {
         "id", "itemid", "itemno", "description", "description2", "unit",
         "type", "created_by", "created_at",
     ],
+    "spk_material_qty_snapshots": [
+        "wodet_id", "material_no", "current_qty", "previous_qty", "unit",
+        "first_seen_at", "last_seen_at", "changed_at",
+    ],
+    "spk_material_qty_history": [
+        "id", "wodet_id", "material_no", "old_qty", "new_qty", "unit", "detected_at",
+    ],
 }
 
 PLACEHOLDER_VALUES = {"user", "username", "password", "pass", "host", "dbname", "database"}

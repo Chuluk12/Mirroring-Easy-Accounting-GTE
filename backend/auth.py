@@ -299,6 +299,39 @@ def ensure_audit_table(cur):
         )
     """)
 
+
+def ensure_spk_material_qty_history_tables(cur):
+    id_type = "SERIAL" if DASHBOARD_DB_KIND == "postgres" else "INTEGER"
+    autoincrement = "" if DASHBOARD_DB_KIND == "postgres" else " AUTOINCREMENT"
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS spk_material_qty_snapshots (
+            wodet_id INTEGER NOT NULL,
+            material_no TEXT NOT NULL,
+            current_qty REAL NOT NULL,
+            previous_qty REAL,
+            unit TEXT,
+            first_seen_at TEXT NOT NULL,
+            last_seen_at TEXT NOT NULL,
+            changed_at TEXT,
+            PRIMARY KEY (wodet_id, material_no)
+        )
+    """)
+    cur.execute(f"""
+        CREATE TABLE IF NOT EXISTS spk_material_qty_history (
+            id {id_type} PRIMARY KEY{autoincrement},
+            wodet_id INTEGER NOT NULL,
+            material_no TEXT NOT NULL,
+            old_qty REAL,
+            new_qty REAL NOT NULL,
+            unit TEXT,
+            detected_at TEXT NOT NULL
+        )
+    """)
+    cur.execute("""
+        CREATE INDEX IF NOT EXISTS idx_spk_material_qty_history_lookup
+        ON spk_material_qty_history (wodet_id, material_no, detected_at)
+    """)
+
 def init_db():
     con = connect_dashboard_db()
     cur = con.cursor()
@@ -309,6 +342,7 @@ def init_db():
         cur.execute("ALTER TABLE barang_baru_log ADD COLUMN created_by TEXT")
 
     ensure_audit_table(cur)
+    ensure_spk_material_qty_history_tables(cur)
 
     # ── Permission Matrix ──────────────────────────────────────────────────
     # admin     → semua modul
