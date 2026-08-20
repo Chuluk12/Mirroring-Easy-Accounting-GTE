@@ -318,17 +318,26 @@ export default function SPK() {
           <div class="approval-item">
             <div class="approval-title">PIC Produksi</div>
             <div class="approval-signature"></div>
-            <div class="approval-name">( ........................................ )</div>
+            <div class="approval-details">
+              <div class="approval-detail-row"><span>Nama</span><span>:</span><span class="approval-detail-line"></span></div>
+              <div class="approval-detail-row"><span>Tanggal</span><span>:</span><span class="approval-detail-line"></span></div>
+            </div>
           </div>
           <div class="approval-item">
             <div class="approval-title">Inventory</div>
             <div class="approval-signature"></div>
-            <div class="approval-name">( ........................................ )</div>
+            <div class="approval-details">
+              <div class="approval-detail-row"><span>Nama</span><span>:</span><span class="approval-detail-line"></span></div>
+              <div class="approval-detail-row"><span>Tanggal</span><span>:</span><span class="approval-detail-line"></span></div>
+            </div>
           </div>
           <div class="approval-item">
             <div class="approval-title">PPC</div>
             <div class="approval-signature"></div>
-            <div class="approval-name">( ........................................ )</div>
+            <div class="approval-details">
+              <div class="approval-detail-row"><span>Nama</span><span>:</span><span class="approval-detail-line"></span></div>
+              <div class="approval-detail-row"><span>Tanggal</span><span>:</span><span class="approval-detail-line"></span></div>
+            </div>
           </div>
         </div>
       </section>
@@ -390,7 +399,9 @@ export default function SPK() {
               .approval-item { text-align: center; }
               .approval-title { font-weight: 700; }
               .approval-signature { height: 64px; }
-              .approval-name { white-space: nowrap; }
+              .approval-details { width: 160px; margin: 0 auto; padding-top: 5px; text-align: left; font-size: 10px; }
+              .approval-detail-row { display: grid; grid-template-columns: 42px 8px 1fr; align-items: center; height: 20px; }
+              .approval-detail-line { align-self: center; height: 12px; border-bottom: 1px solid #111827; }
               .page-break { break-after: page; page-break-after: always; }
               @page {
                 size: A4 landscape;
