@@ -18,6 +18,10 @@ from auth import (
     log_activity, get_audit_logs, connect_dashboard_db, DASHBOARD_DB_KIND
 )
 from integration_api import register_integration_api
+try:
+    import nats_publisher
+except ImportError:
+    nats_publisher = None
 import fdb
 import logging
 import os
@@ -97,6 +101,11 @@ fdb.load_api(fbclient_path)
 
 register_integration_api(app)
 
+
+@app.route("/health")
+def health():
+    return jsonify({"status": "ok"})
+
 if len(app.config["JWT_SECRET_KEY"]) < 32:
     app.logger.warning(
         "EASY_JWT_SECRET_KEY belum aman; gunakan secret acak minimal 32 karakter."
@@ -128,6 +137,12 @@ DB_CONFIG = {
 BACKEND_PORT = int(os.getenv("EASY_BACKEND_PORT", "5001"))
 BACKGROUND_SYNC_ENABLED = os.getenv("EASY_BACKGROUND_SYNC_ENABLED", "0").lower() in {"1", "true", "yes"}
 BACKGROUND_SYNC_INTERVAL = max(int(os.getenv("EASY_BACKGROUND_SYNC_INTERVAL", "60")), 10)
+
+NATS_ENABLED = os.getenv("NATS_ENABLED", "0").lower() in {"1", "true", "yes"}
+NATS_SUBJECT = os.getenv("NATS_SUBJECT", "stock.material.sync")
+NATS_SYNC_INTERVAL = max(int(os.getenv("NATS_SYNC_INTERVAL", "60")), 10)
+NATS_LIMIT = max(int(os.getenv("NATS_LIMIT", "1000")), 1)
+NATS_CHUNK_SIZE = max(int(os.getenv("NATS_CHUNK_SIZE", "100")), 1)
 
 
 def connect_easy_db(retries=2, delay=0.4):
@@ -8666,8 +8681,14 @@ def _monitoring_formula_where_clause(search="", date_from="", date_to="", wodet_
             OR LOWER(i.ITEMDESCRIPTION) CONTAINING LOWER(?)
             OR LOWER(so.SONO) CONTAINING LOWER(?)
             OR LOWER(so.PONO) CONTAINING LOWER(?)
+            OR EXISTS (
+                SELECT 1
+                FROM WODETEXPENSE e
+                WHERE e.WODETID = det.ID
+                  AND LOWER(e.DLBORNO) CONTAINING LOWER(?)
+            )
         )""")
-        params += [search] * 6
+        params += [search] * 7
 
     if date_from:
         conditions.append("w.WODATE >= ?")
@@ -9559,6 +9580,8 @@ def api_monitoring_formula():
         status = request.args.get("status", "").strip()
         wodet_id_filter = request.args.get("wodet_id", "").strip()
         no_spk_filter = request.args.get("no_spk", "").strip()
+        sort_by = request.args.get("sort_by", "").strip()
+        sort_order = request.args.get("sort_order", "").strip().lower()
         offset = int(request.args.get("offset", 0))
         requested_limit = int(request.args.get("limit", 10))
         qty_only = request.args.get("qty_only", "").lower() in ("1", "true", "yes")
@@ -9567,6 +9590,20 @@ def api_monitoring_formula():
         max_limit = 500 if no_spk_filter else (50 if skip_count else 10)
         limit = max(1, min(requested_limit, max_limit)) if not search else max(1, requested_limit)
         query_limit = limit + 1 if skip_count else limit
+        sort_fields = {
+            "wodet_id": "det.ID", "no_barang": "det.ITEMNO",
+            "nama_barang": "COALESCE(i.ITEMDESCRIPTION, det.JOBDESCRIPTION)",
+            "qty_spk": "det.QUANTITY", "keterangan": "det.JOBDESCRIPTION",
+            "uom": "det.UNIT",
+        }
+        result_sort_fields = {
+            "wodet_id": "p.WODET_ID", "no_barang": "p.ITEMNO",
+            "nama_barang": "p.ITEM_NAME", "qty_spk": "p.QUANTITY",
+            "keterangan": "p.JOBDESCRIPTION", "uom": "p.UNIT",
+        }
+        direction = "DESC" if sort_order in ("desc", "descend") else "ASC"
+        order_sql = f"{sort_fields[sort_by]} {direction}, det.ID" if sort_by in sort_fields else "w.WODATE DESC, w.WONO, det.ITEMNO"
+        result_order_sql = f"{result_sort_fields[sort_by]} {direction}, p.WODET_ID" if sort_by in result_sort_fields else "p.WODATE DESC, p.WONO, p.ITEMNO"
 
         con = fdb.connect(**DB_CONFIG)
         cur = con.cursor()
@@ -9634,13 +9671,14 @@ def api_monitoring_formula():
                     so.SONO,
                     so.PONO,
                     det.STATUS AS WODET_STATUS,
-                    {wodet_closed_expr} AS IS_WORK_ORDER_CLOSED
+                    {wodet_closed_expr} AS IS_WORK_ORDER_CLOSED,
+                    det.JOBDESCRIPTION
                 FROM WO w
                 JOIN WODET det ON det.WOID = w.ID
                 LEFT JOIN ITEM i ON i.ITEMNO = det.ITEMNO
                 LEFT JOIN SO so ON so.SOID = det.SOID
                 WHERE {where_sql}
-                ORDER BY w.WODATE DESC, w.WONO, det.ITEMNO
+                ORDER BY {order_sql}
             ),
             result_agg AS (
                 SELECT
@@ -9694,13 +9732,14 @@ def api_monitoring_formula():
                 ma.TOTAL_QTYTAKEN,
                 COALESCE(rbm.TOTAL_MAT_KELUAR, rbw.TOTAL_MAT_KELUAR, 0) AS TOTAL_MAT_KELUAR
                 ,p.WODET_STATUS,
-                p.IS_WORK_ORDER_CLOSED
+                p.IS_WORK_ORDER_CLOSED,
+                p.JOBDESCRIPTION
             FROM page_rows p
             LEFT JOIN result_agg ra           ON ra.WODETID  = p.WODET_ID
             LEFT JOIN mat_agg ma              ON ma.WODETID  = p.WODET_ID
             LEFT JOIN release_by_material rbm ON rbm.WODETID = p.WODET_ID
             LEFT JOIN release_by_wodet rbw    ON rbw.WODETID = p.WODET_ID
-            ORDER BY p.WODATE DESC, p.WONO, p.ITEMNO
+            ORDER BY {result_order_sql}
         """, [query_limit, offset] + params_where)
 
         work_rows = []
@@ -9753,6 +9792,7 @@ def api_monitoring_formula():
                 "production_status": production_status,
                 "wodet_status": wodet_status,
                 "is_work_order_closed": is_work_order_closed,
+                "keterangan": str(row[16] or "").strip(),
                 "qty_berhenti_produksi": max(qty_spk - total_qty_hasil, 0) if is_work_order_closed else 0.0,
             })
 
@@ -9937,6 +9977,7 @@ def api_monitoring_formula():
                 "no_barang": row["item_no"],
                 "nama_barang": row["item_name"],
                 "qty_spk": row["qty_spk"],
+                "keterangan": row["keterangan"],
                 "uom": row["uom"],
                 "no_pesanan": row["no_pesanan"],
                 "no_po": row["no_po"],
@@ -10023,7 +10064,6 @@ def api_spk():
         limit     = int(request.args.get("limit", 50))
         skip_count = request.args.get("skip_count", "").lower() in ("1", "true", "yes")
         query_limit = limit + 1 if skip_count else limit
-
         con = fdb.connect(**DB_CONFIG)
         cur = con.cursor()
 
@@ -14033,13 +14073,56 @@ def background_sync():
         time.sleep(BACKGROUND_SYNC_INTERVAL)
 
 
+def _nats_chunk(items, size):
+    for index in range(0, len(items), size):
+        yield index // size, items[index:index + size]
+
+
+def nats_sync():
+    publisher = nats_publisher.get_publisher() if nats_publisher else None
+    if publisher is None:
+        app.logger.warning("NATS publisher tidak tersedia; nats_sync nonaktif")
+        return
+
+    subject = f"{NATS_SUBJECT}.replace"
+    while True:
+        try:
+            result = get_stock_item_material_data(
+                search="", offset=0, limit=NATS_LIMIT,
+                filters=None, sort_field="", sort_order="", aggregate=True,
+            )
+            rows = result.get("data", []) if isinstance(result, dict) else []
+            chunks = list(_nats_chunk(rows, NATS_CHUNK_SIZE))
+            total = len(rows)
+            for chunk_index, chunk in chunks:
+                payload = {
+                    "action": "replace",
+                    "chunk_index": chunk_index,
+                    "chunk_total": len(chunks),
+                    "chunk_size": NATS_CHUNK_SIZE,
+                    "total_rows": total,
+                    "data": chunk,
+                }
+                publisher.publish(subject, payload)
+            app.logger.info(
+                "NATS sync published subject=%s rows=%d chunks=%d",
+                subject, total, len(chunks),
+            )
+        except Exception as exc:
+            app.logger.exception("NATS sync gagal: %s", exc)
+        time.sleep(NATS_SYNC_INTERVAL)
+
+
 if __name__ == "__main__":
     init_db()
-    init_baseline()
     if BACKGROUND_SYNC_ENABLED:
         thread = threading.Thread(target=background_sync)
         thread.daemon = True
         thread.start()
-    print(f"Server jalan di http://0.0.0.0:{BACKEND_PORT}")
-    print(f"Akses dari jaringan lokal: http://<IP-komputer-ini>:{BACKEND_PORT}")
+    if NATS_ENABLED:
+        nats_thread = threading.Thread(target=nats_sync)
+        nats_thread.daemon = True
+        nats_thread.start()
+    print(f"Server jalan di http://0.0.0.0:{BACKEND_PORT}", flush=True)
+    print(f"Akses dari jaringan lokal: http://<IP-komputer-ini>:{BACKEND_PORT}", flush=True)
     socketio.run(app, host="0.0.0.0", debug=False, port=BACKEND_PORT, allow_unsafe_werkzeug=True)

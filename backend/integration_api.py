@@ -2,6 +2,7 @@ import hmac
 import hashlib
 import json
 import os
+import re
 import threading
 import time
 import uuid
@@ -42,9 +43,18 @@ ALLOWED_PARAMS = {
     "standarisasi-harga": {"search", "status", "date_from", "date_to"},
     "fifo": {"search", "columns", "date_from", "date_to"},
     "pembelian": {"search", "date_from", "date_to"},
+    "saved-reports": {"user"},
+    "gl-accounts": {"accounttype", "parentaccount", "suspended"},
 }
 _RATE_BUCKETS = defaultdict(deque)
 _RATE_LOCK = threading.Lock()
+_SAFE_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+class InvalidReportParameters(ValueError):
+    def __init__(self, missing):
+        self.missing = missing
+        super().__init__(f"Parameter report wajib: {', '.join(missing)}")
 
 
 def _configured_keys():
@@ -326,6 +336,61 @@ def _select_columns(rows):
     ]
 
 
+def _json_value(value):
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    if value.__class__.__name__ == "Decimal":
+        return float(value)
+    return value
+
+
+def _json_rows(rows):
+    return [
+        {key: _json_value(value) for key, value in row.items()}
+        for row in rows
+        if isinstance(row, dict)
+    ]
+
+
+def _filter_column_rows(rows, reserved):
+    filters = {
+        key: values
+        for key in request.args
+        if key not in reserved
+        for values in [_split_csv_param(key)]
+        if values
+    }
+    if not filters:
+        return rows
+    filtered = []
+    for row in rows:
+        if all(
+            any(str(value).lower() in str(row.get(key, "")).lower() for value in values)
+            for key, values in filters.items()
+        ):
+            filtered.append(row)
+    return filtered
+
+
+def _filter_report_user_rows(rows):
+    user = str(request.args.get("user", "") or "").strip().lower()
+    if not user:
+        return rows
+    filtered = []
+    for row in rows:
+        if user in str(row.get("username") or row.get("user") or row.get("userid") or "").lower():
+            filtered.append(row)
+    return filtered
+
+
+def _user_can_access_report(report):
+    user = str(request.args.get("user", "") or "").strip()
+    if not user:
+        return True
+    level = str(report.get("level") or "").upper()
+    return not level or user.upper() in level
+
+
 def _shape_rows(rows, resource, select_columns=True):
     shaped = _filter_created_at_rows(rows)
     shaped = _filter_date_rows(shaped, resource)
@@ -352,6 +417,323 @@ def _internal_get(app, path, query_params):
         headers={"Authorization": f"Bearer {token}"},
     )
     return response.status_code, response.get_json(silent=True) or {}
+
+
+def _fetch_saved_reports(user=""):
+    from server import connect_easy_db
+
+    con = connect_easy_db()
+    try:
+        cur = con.cursor()
+        params = []
+        user = str(user or "").strip()
+        user_filter = ""
+        if user:
+            user_filter = "AND (level IS NULL OR level = '' OR UPPER(level) CONTAINING UPPER(?))"
+            params.append(user)
+        cur.execute(f"""
+            SELECT *
+            FROM REPORTFORMAT
+            WHERE report_cat_id = 20 AND type = 1
+              {user_filter}
+            ORDER BY seq, report_id
+        """, params)
+        columns = [desc[0].lower() for desc in cur.description]
+        return [dict(zip(columns, row)) for row in cur.fetchall()]
+    finally:
+        con.close()
+
+
+def _fetch_saved_report(report_id):
+    rows = [row for row in _fetch_saved_reports() if int(row.get("report_id") or 0) == report_id]
+    return rows[0] if rows else None
+
+
+def _fetch_report_fields(report_id):
+    from server import connect_easy_db
+
+    con = connect_easy_db()
+    try:
+        cur = con.cursor()
+        cur.execute(
+            "SELECT * FROM MEMORIZEFIELD WHERE report_id = ? ORDER BY ordering, field_id",
+            (report_id,),
+        )
+        columns = [desc[0].lower() for desc in cur.description]
+        return [dict(zip(columns, row)) for row in cur.fetchall()]
+    finally:
+        con.close()
+
+
+def _resolve_glaccount_param(report):
+    explicit = str(request.args.get("glaccount", "") or "").strip()
+    if explicit:
+        return explicit
+
+    title = str(report.get("report_title") or report.get("report_title_ind") or "")
+    candidates = [part.strip() for part in title.split("-") if part.strip()]
+    candidates.append(str(request.args.get("search", "") or "").strip())
+
+    from server import connect_easy_db
+
+    con = connect_easy_db()
+    try:
+        cur = con.cursor()
+        for candidate in candidates:
+            if not candidate:
+                continue
+            cur.execute("""
+                SELECT glaccount
+                FROM GLACCNT
+                WHERE UPPER(accountname) = UPPER(?) OR UPPER(accountname2) = UPPER(?)
+                ROWS 1
+            """, (candidate, candidate))
+            row = cur.fetchone()
+            if row:
+                return row[0]
+        for candidate in candidates:
+            if not candidate:
+                continue
+            cur.execute("""
+                SELECT glaccount
+                FROM GLACCNT
+                WHERE accountname CONTAINING ? OR accountname2 CONTAINING ?
+                ORDER BY CHAR_LENGTH(accountname)
+                ROWS 1
+            """, (candidate, candidate))
+            row = cur.fetchone()
+            if row:
+                return row[0]
+    finally:
+        con.close()
+    return ""
+
+
+def _account_names_by_glaccount(accounts):
+    accounts = sorted({str(value or "").strip() for value in accounts if str(value or "").strip()})
+    if not accounts:
+        return {}
+    from server import connect_easy_db
+
+    con = connect_easy_db()
+    try:
+        cur = con.cursor()
+        placeholders = ", ".join("?" for _ in accounts)
+        cur.execute(f"SELECT glaccount, accountname FROM GLACCNT WHERE glaccount IN ({placeholders})", accounts)
+        return {row[0]: row[1] for row in cur.fetchall()}
+    finally:
+        con.close()
+
+
+def _enrich_report_rows(report, rows):
+    if str(report.get("table") or "").upper() != "LOOKUP_GLDETIL":
+        return rows
+    names = _account_names_by_glaccount(row.get("glaccount") for row in rows)
+    for row in rows:
+        row["accountname"] = names.get(row.get("glaccount"), "")
+        row["amount"] = (row.get("bdebit") or 0) - (row.get("bcredit") or 0)
+    return rows
+
+
+def _effective_report_dates(report):
+    parameter = str(report.get("parameter") or "").upper()
+    return (
+        request.args.get("date_from", "") or ("1900-01-01" if "PARAMDATE1" in parameter else ""),
+        request.args.get("date_to", "") or ("2099-12-31" if "PARAMDATE2" in parameter else ""),
+    )
+
+
+def _execute_saved_report(report, date_from="", date_to=""):
+    from server import connect_easy_db
+
+    source = str(report.get("table") or "").strip()
+    if not _SAFE_IDENTIFIER.match(source):
+        raise ValueError("Invalid report source")
+
+    parameter = str(report.get("parameter") or "").strip()
+    tokens = []
+    if parameter.startswith("(") and parameter.endswith(")"):
+        tokens = [token.strip() for token in parameter[1:-1].split(",") if token.strip()]
+
+    params = []
+    missing = []
+    for token in tokens:
+        normalized = token.lstrip(":").strip().lower()
+        if normalized == "paramdate1":
+            value = date_from
+            name = "date_from"
+        elif normalized == "paramdate2":
+            value = date_to
+            name = "date_to"
+        elif normalized == "bahasa":
+            value = request.args.get("bahasa", request.args.get("language", "1"))
+            name = "bahasa"
+        else:
+            name = normalized.split(".")[-1]
+            value = _resolve_glaccount_param(report) if name == "glaccount" else request.args.get(name, "")
+        if name == "date_from" and not value:
+            value = "1900-01-01"
+        if name == "date_to" and not value:
+            value = "2099-12-31"
+        if value in (None, ""):
+            missing.append(name)
+        params.append(value)
+    if missing:
+        raise InvalidReportParameters(missing)
+
+    if params:
+        placeholders = ", ".join("?" for _ in params)
+        sql = f"SELECT * FROM {source}({placeholders})"
+    else:
+        sql = f"SELECT * FROM {source}"
+
+    con = connect_easy_db()
+    try:
+        cur = con.cursor()
+        cur.execute(sql, params)
+        columns = [desc[0].lower() for desc in cur.description]
+        return _enrich_report_rows(report, [dict(zip(columns, row)) for row in cur.fetchall()])
+    finally:
+        con.close()
+
+
+def _fetch_gl_accounts(offset, limit):
+    from server import connect_easy_db
+
+    search = str(request.args.get("search", "") or "").strip()
+    conditions = []
+    params = []
+    if search:
+        conditions.append("(glaccount CONTAINING ? OR accountname CONTAINING ? OR accountname2 CONTAINING ?)")
+        params.extend([search, search, search])
+    for key in ("accounttype", "parentaccount", "suspended"):
+        value = str(request.args.get(key, "") or "").strip()
+        if value:
+            conditions.append(f"{key} = ?")
+            params.append(value)
+    where_sql = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+
+    con = connect_easy_db()
+    try:
+        cur = con.cursor()
+        cur.execute(f"SELECT COUNT(*) FROM GLACCNT {where_sql}", params)
+        total = int(cur.fetchone()[0] or 0)
+        cur.execute(f"""
+            SELECT glaccount, accountname, accountname2, accounttype,
+                   parentaccount, suspended, allusers
+            FROM GLACCNT
+            {where_sql}
+            ORDER BY glaccount
+            ROWS ? TO ?
+        """, params + [offset + 1, offset + limit])
+        columns = [desc[0].lower() for desc in cur.description]
+        return total, [dict(zip(columns, row)) for row in cur.fetchall()]
+    finally:
+        con.close()
+
+
+def _gl_accounts_response(offset, limit):
+    total, rows = _fetch_gl_accounts(offset, limit)
+    rows = _shape_rows(_json_rows(rows), "gl-accounts")
+    return {
+        "success": True,
+        "api_version": "v1",
+        "resource": "gl-accounts",
+        "generated_at": datetime.now().astimezone().isoformat(),
+        "data": rows,
+        "meta": {
+            "offset": offset,
+            "page": (offset // limit) + 1 if limit else 1,
+            "limit": limit,
+            "count": len(rows),
+            "total": total,
+            "total_page": ((total + limit - 1) // limit) if limit else 1,
+            "has_more": offset + len(rows) < total,
+            "search": request.args.get("search", ""),
+        },
+    }, 200
+
+
+def _saved_reports_response(offset, limit):
+    rows = _shape_rows(_fetch_saved_reports(request.args.get("user", "")), "saved-reports")
+    total = len(rows)
+    data = rows[offset:offset + limit]
+    page = (offset // limit) + 1 if limit else 1
+    return {
+        "success": True,
+        "api_version": "v1",
+        "resource": "saved-reports",
+        "generated_at": datetime.now().astimezone().isoformat(),
+        "data": data,
+        "meta": {
+            "offset": offset,
+            "page": page,
+            "limit": limit,
+            "count": len(data),
+            "total": total,
+            "total_page": ((total + limit - 1) // limit) if limit else 1,
+            "has_more": offset + len(data) < total,
+            "user": request.args.get("user", ""),
+            "date_from": request.args.get("date_from", ""),
+            "date_to": request.args.get("date_to", ""),
+        },
+    }, 200
+
+
+def _saved_report_list_response(report_id, offset, limit):
+    report = _fetch_saved_report(report_id)
+    if not report:
+        return jsonify({
+            "success": False,
+            "api_version": "v1",
+            "resource": "saved-report-list",
+            "error": {"code": "not_found", "message": "Report tidak ditemukan"},
+        }), 404
+    if not _user_can_access_report(report):
+        return jsonify({
+            "success": False,
+            "api_version": "v1",
+            "resource": "saved-report-list",
+            "error": {"code": "access_denied", "message": "User tidak punya akses report"},
+        }), 403
+
+    date_from, date_to = _effective_report_dates(report)
+    rows = _execute_saved_report(report, date_from, date_to)
+    rows = _json_rows(rows)
+    rows = _filter_report_user_rows(rows)
+    rows = _filter_date_rows(rows, "saved-reports")
+    reserved = COMMON_PARAMS | {"user", "bahasa", "language"}
+    rows = _filter_column_rows(rows, reserved)
+    rows = _select_columns(_sort_rows(rows))
+    total = len(rows)
+    data = rows[offset:offset + limit]
+    return jsonify({
+        "success": True,
+        "api_version": "v1",
+        "resource": "saved-report-list",
+        "generated_at": datetime.now().astimezone().isoformat(),
+        "report": {
+            "report_id": report.get("report_id"),
+            "report_name": report.get("report_name"),
+            "report_title": report.get("report_title"),
+            "report_title_ind": report.get("report_title_ind"),
+            "source": report.get("table"),
+            "parameter": report.get("parameter"),
+            "fields": _json_rows(_fetch_report_fields(report_id)),
+        },
+        "data": data,
+        "meta": {
+            "offset": offset,
+            "page": (offset // limit) + 1 if limit else 1,
+            "limit": limit,
+            "count": len(data),
+            "total": total,
+            "total_page": ((total + limit - 1) // limit) if limit else 1,
+            "has_more": offset + len(data) < total,
+            "date_from": date_from,
+            "date_to": date_to,
+        },
+    }), 200
 
 def _internal_post(app, path, json_data):
     token = create_access_token(
@@ -581,13 +963,18 @@ def register_integration_api(app):
         if auth_error:
             return auth_error
 
+        offset, limit, pagination_error = _pagination()
+        if pagination_error:
+            return pagination_error
+
         columns_param = request.args.get("column", "").strip()
         requested_cols = {c.strip() for c in columns_param.split(",") if c.strip()} if columns_param else None
 
-        # Always inject search, skip_count=1, limit=500
-        # skip_count=1 disables count aggregation
-        # Use no_spk directly instead of search to avoid slow LIKE queries
-        params = [("no_spk", no_spk), ("offset", 0), ("limit", 500), ("skip_count", "1")]
+        params = [("no_spk", no_spk), ("offset", offset), ("limit", limit)]
+        for key in ("search", "sort_by", "sort_order"):
+            value = request.args.get(key, "").strip()
+            if value:
+                params.append((key, value))
         
         # If specific columns requested and we don't need heavy computations
         if requested_cols:
@@ -612,6 +999,7 @@ def register_integration_api(app):
         # Ensure exact match on SPK Number since 'search' uses LIKE / CONTAINING
         rows = upstream.get("data", [])
         data = [r for r in rows if str(r.get("no_spk", "")).strip() == no_spk.strip()]
+        total = int(upstream.get("total", len(data)) or 0)
         
         if not data:
             return jsonify({
@@ -637,7 +1025,15 @@ def register_integration_api(app):
             "generated_at": datetime.now().astimezone().isoformat(),
             "data": data,
             "meta": {
-                "count": len(data)
+                "page": (offset // limit) + 1,
+                "limit": limit,
+                "count": len(data),
+                "total": total,
+                "total_page": (total + limit - 1) // limit,
+                "has_more": offset + len(data) < total,
+                "search": request.args.get("search", ""),
+                "sort_by": request.args.get("sort_by", ""),
+                "sort_order": request.args.get("sort_order", ""),
             }
         })
 
@@ -672,6 +1068,75 @@ def register_integration_api(app):
     @blueprint.get("/pembelian")
     def pembelian():
         return list_resource("pembelian", "/api/pembelian")
+
+    @blueprint.get("/saved-reports")
+    def saved_reports():
+        auth_error = _auth_error()
+        if auth_error:
+            return auth_error
+
+        parameter_error = _unknown_params("saved-reports")
+        if parameter_error:
+            return parameter_error
+
+        offset, limit, pagination_error = _pagination()
+        if pagination_error:
+            return pagination_error
+
+        try:
+            response_data, status = _saved_reports_response(offset, limit)
+        except Exception:
+            app.logger.exception("Failed fetching saved reports")
+            return _error_response("saved-reports", 500, {})
+        return jsonify(response_data), status
+
+    @blueprint.get("/saved-reports/<int:report_id>/list")
+    def saved_report_list(report_id):
+        auth_error = _auth_error()
+        if auth_error:
+            return auth_error
+
+        offset, limit, pagination_error = _pagination()
+        if pagination_error:
+            return pagination_error
+
+        try:
+            return _saved_report_list_response(report_id, offset, limit)
+        except InvalidReportParameters as exc:
+            return jsonify({
+                "success": False,
+                "api_version": "v1",
+                "resource": "saved-report-list",
+                "error": {
+                    "code": "missing_report_parameters",
+                    "message": str(exc),
+                    "missing": exc.missing,
+                },
+            }), 400
+        except Exception:
+            app.logger.exception("Failed fetching saved report list")
+            return _error_response("saved-report-list", 500, {})
+
+    @blueprint.get("/gl-accounts")
+    def gl_accounts():
+        auth_error = _auth_error()
+        if auth_error:
+            return auth_error
+
+        parameter_error = _unknown_params("gl-accounts")
+        if parameter_error:
+            return parameter_error
+
+        offset, limit, pagination_error = _pagination()
+        if pagination_error:
+            return pagination_error
+
+        try:
+            response_data, status = _gl_accounts_response(offset, limit)
+        except Exception:
+            app.logger.exception("Failed fetching GL accounts")
+            return _error_response("gl-accounts", 500, {})
+        return jsonify(response_data), status
 
     @blueprint.get("/standarisasi-harga/<int:standar_id>/details")
     def standarisasi_harga_details(standar_id):
