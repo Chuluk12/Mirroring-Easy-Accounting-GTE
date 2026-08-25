@@ -83,6 +83,7 @@ export default function MainLayout() {
     const persediaanChildren = []
     if (hasPermission('stock')) {
       persediaanChildren.push({ key: '/stock', icon: <InboxOutlined />, label: 'Stok Barang' })
+      persediaanChildren.push({ key: '/standarisasi', icon: <SafetyOutlined />, label: 'Standarisasi' })
     }
     if (hasPermission('gudang')) {
       persediaanChildren.push({ key: '/gudang', icon: <ContainerOutlined />, label: 'Gudang' })
@@ -253,7 +254,7 @@ export default function MainLayout() {
 
   const getDefaultOpenKeys = () => {
     const path = location.pathname
-    if (['/stock', '/gudang', '/barang-baru', '/riwayat'].includes(path)) return ['persediaan']
+    if (['/stock', '/standarisasi', '/gudang', '/barang-baru', '/riwayat'].includes(path)) return ['persediaan']
     if (path.startsWith('/pembelian')) return ['pembelian-group']
     if (path.startsWith('/penjualan')) return ['penjualan-group']
     if (path.startsWith('/manufaktur')) return ['manufaktur-group']

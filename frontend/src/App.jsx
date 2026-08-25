@@ -5,6 +5,7 @@ import { AuthProvider, useAuth } from './context/AuthContext'
 import MainLayout from './components/MainLayout'
 const Dashboard = lazy(() => import('./pages/Dashboard'))
 const Stock = lazy(() => import('./pages/Stock'))
+const Standarisasi = lazy(() => import('./pages/Standarisasi'))
 const Gudang = lazy(() => import('./pages/Gudang'))
 const SIINAS = lazy(() => import('./pages/SIINAS'))
 const SIINASReferensi = lazy(() => import('./pages/SIINASReferensi'))
@@ -57,6 +58,7 @@ function AppRoutes() {
         <Route path="/" element={<PrivateRoute><MainLayout /></PrivateRoute>}>
           <Route index element={<Dashboard />} />
           <Route path="stock"       element={<PrivateRoute module="stock"><Stock /></PrivateRoute>} />
+          <Route path="standarisasi" element={<PrivateRoute module="stock"><Standarisasi /></PrivateRoute>} />
           <Route path="gudang"      element={<PrivateRoute module="gudang"><Gudang /></PrivateRoute>} />
           <Route path="siinas/monitoring-report" element={<PrivateRoute module="siinas"><SIINAS /></PrivateRoute>} />
           <Route path="siinas/referensi" element={<PrivateRoute module="siinas"><SIINASReferensi /></PrivateRoute>} />

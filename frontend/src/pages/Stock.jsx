@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback, useMemo, useRef } from 'react'
 import { Table, Input, Tag, Card, Button, Space, message, Tooltip, Row, Col, Statistic, Typography, Popover, Select } from 'antd'
 import {
   AppstoreOutlined,
+  CloseCircleOutlined,
   FileExcelOutlined,
   SafetyCertificateOutlined,
   SearchOutlined,
@@ -17,6 +18,7 @@ import useVisiblePolling from '../hooks/useVisiblePolling'
 const { Search } = Input
 const { Text } = Typography
 const DEFAULT_PAGE_SIZE = 20
+const EMPTY_FIXED_CATEGORIES = []
 
 const purple = '#7c3cff'
 const cyan = '#11b7d8'
@@ -29,6 +31,7 @@ const emptySummary = {
   category_count: 0,
   categories: [],
   standardized_items: 0,
+  unstandardized_items: 0,
   below_minimum_items: 0,
 }
 
@@ -131,8 +134,13 @@ function SummaryCard({ title, value, icon, color, loading, children }) {
   )
 }
 
-export default function Stock() {
+export default function Stock({
+  fixedCategories = EMPTY_FIXED_CATEGORIES,
+  pageTitle = 'Stok Barang',
+  exportFilename = 'StokBarang',
+} = {}) {
   const { user } = useAuth()
+  const initialFilters = fixedCategories.length ? { category: fixedCategories } : {}
   const [data, setData] = useState([])
   const [loading, setLoading] = useState(false)
   const [summary, setSummary] = useState(emptySummary)
@@ -140,13 +148,13 @@ export default function Stock() {
   const [exporting, setExporting] = useState(false)
   const [searchValue, setSearchValue] = useState('')
   const [pagination, setPagination] = useState({ current: 1, pageSize: DEFAULT_PAGE_SIZE, total: 0 })
-  const [activeFilters, setActiveFilters] = useState({})
+  const [activeFilters, setActiveFilters] = useState(initialFilters)
   const [activeSorter, setActiveSorter] = useState({})
   const [filterOptions, setFilterOptions] = useState({})
   const [filterOptionsLoading, setFilterOptionsLoading] = useState(false)
 
   const searchRef = useRef('')
-  const filtersRef = useRef({})
+  const filtersRef = useRef(initialFilters)
   const sorterRef = useRef({})
   const pageRef = useRef(1)
   const pageSizeRef = useRef(DEFAULT_PAGE_SIZE)
@@ -189,14 +197,17 @@ export default function Stock() {
   const fetchSummary = useCallback(async (showLoading = true) => {
     if (showLoading) setSummaryLoading(true)
     try {
-      const res = await api.get('/api/stock/summary')
+      const res = await api.get('/api/stock/summary', {
+        params: { category: fixedCategories.join('||') },
+        timeout: 90000,
+      })
       setSummary({ ...emptySummary, ...(res.data || {}) })
     } catch (e) {
       console.error(e)
     } finally {
       if (showLoading) setSummaryLoading(false)
     }
-  }, [])
+  }, [fixedCategories])
 
   const fetchFilterOptions = useCallback(async () => {
     setFilterOptionsLoading(true)
@@ -211,14 +222,14 @@ export default function Stock() {
   }, [])
 
   useEffect(() => {
-    fetchData(1, DEFAULT_PAGE_SIZE, '')
-    fetchSummary()
+    fetchData(1, DEFAULT_PAGE_SIZE, '', true, filtersRef.current)
+      .finally(() => fetchSummary())
     fetchFilterOptions()
   }, [fetchData, fetchFilterOptions, fetchSummary])
 
-  useVisiblePolling(() => {
-    fetchData(pageRef.current, pageSizeRef.current, searchRef.current, false, filtersRef.current, sorterRef.current)
-    fetchSummary(false)
+  useVisiblePolling(async () => {
+    await fetchData(pageRef.current, pageSizeRef.current, searchRef.current, false, filtersRef.current, sorterRef.current)
+    await fetchSummary(false)
   }, 30000)
 
   const handleSearch = useCallback((val) => {
@@ -238,6 +249,17 @@ export default function Stock() {
     const nextFilters = {
       ...filtersRef.current,
       code_product: values || [],
+    }
+    filtersRef.current = nextFilters
+    setActiveFilters(nextFilters)
+    pageRef.current = 1
+    fetchData(1, pageSizeRef.current, searchRef.current, true, nextFilters, sorterRef.current)
+  }
+
+  const handleCostDescriptionFilter = value => {
+    const nextFilters = {
+      ...filtersRef.current,
+      cost_description: value ? [value] : [],
     }
     filtersRef.current = nextFilters
     setActiveFilters(nextFilters)
@@ -266,7 +288,7 @@ export default function Stock() {
       minimum_qty: filters.minimum_qty || [],
       stock_note: filters.stock_note || [],
       cost_description: filters.cost_description || [],
-      category: filters.category || [],
+      category: fixedCategories.length ? fixedCategories : (filters.category || []),
     }
     const nextSorter = {
       field: sorter?.field || '',
@@ -305,8 +327,8 @@ export default function Stock() {
       return Array.isArray(res.data) ? res.data : (res.data.data || [])
     },
     columns: filterExportColumnsByPermission('stock', STOCK_EXPORT_COLS, user),
-    filename: 'StokBarang',
-    sheetName: 'Stok Barang',
+    filename: exportFilename,
+    sheetName: pageTitle,
     message,
     setExporting,
     loadingText: 'Menyiapkan data stok...',
@@ -324,8 +346,9 @@ export default function Stock() {
     buildCodeProductFilters(filterOptions.code_product)
   ), [filterOptions.code_product])
   const costDescriptionFilters = useMemo(() => ([
+    { text: 'Sudah Standarisasi', value: '__STANDARDIZED__' },
+    { text: 'Belum Standarisasi', value: '__UNSTANDARDIZED__' },
     { text: 'HPP Metode FIFO', value: 'HPP Metode FIFO' },
-    { text: 'Standarisasi', value: 'Standarisasi' },
     { text: '(Kosong)', value: '__EMPTY__' },
   ]), [])
   const categoryFilters = useMemo(() => (
@@ -405,10 +428,18 @@ export default function Stock() {
       dataIndex: 'cost_description',
       key: 'cost_description',
       width: 190,
-      ellipsis: { showTitle: false },
-      ...serverSorterProps('cost_description'),
-      ...checklistFilterProps('cost_description', costDescriptionFilters),
-      render: val => <Tooltip title={val}><span>{val || '-'}</span></Tooltip>,
+      render: val => {
+        const lines = String(val || '').split(' | ').filter(Boolean)
+        return (
+          <Tooltip title={val || '-'}>
+            <div style={{ lineHeight: 1.45, whiteSpace: 'normal', overflowWrap: 'anywhere' }}>
+              {lines.length
+                ? lines.map(line => <div key={line}>{line}</div>)
+                : '-'}
+            </div>
+          </Tooltip>
+        )
+      },
     },
     {
       title: 'Satuan',
@@ -443,7 +474,7 @@ export default function Stock() {
   return (
     <>
       <Row gutter={[12, 12]} style={{ marginBottom: 14 }}>
-        <Col xs={24} sm={12} xl={5}>
+        <Col xs={24} sm={12} xl={4}>
           <SummaryCard
             title="Total Barang"
             value={summary.total_items}
@@ -452,7 +483,7 @@ export default function Stock() {
             loading={summaryLoading}
           />
         </Col>
-        <Col xs={24} sm={24} xl={9}>
+        <Col xs={24} sm={24} xl={8}>
           <SummaryCard
             title="Kategori Barang"
             value={summary.category_count}
@@ -489,7 +520,7 @@ export default function Stock() {
             </Space>
           </SummaryCard>
         </Col>
-        <Col xs={24} sm={12} xl={5}>
+        <Col xs={24} sm={12} xl={4}>
           <SummaryCard
             title="Sudah STB"
             value={summary.standardized_items}
@@ -498,7 +529,16 @@ export default function Stock() {
             loading={summaryLoading}
           />
         </Col>
-        <Col xs={24} sm={12} xl={5}>
+        <Col xs={24} sm={12} xl={4}>
+          <SummaryCard
+            title="Belum STB"
+            value={summary.unstandardized_items}
+            icon={<CloseCircleOutlined />}
+            color="#64748b"
+            loading={summaryLoading}
+          />
+        </Col>
+        <Col xs={24} sm={12} xl={4}>
           <SummaryCard
             title="Lewat Minimum"
             value={summary.below_minimum_items}
@@ -509,7 +549,7 @@ export default function Stock() {
         </Col>
       </Row>
 
-    <Card className="stock-page-card" title="📦 Stok Barang" extra={
+    <Card className="stock-page-card" title={`📦 ${pageTitle}`} extra={
       <Space wrap>
         <Select
           mode="multiple"
@@ -526,6 +566,17 @@ export default function Stock() {
           filterOption={(input, option) => String(option?.label || '').toLowerCase().includes(input.toLowerCase())}
           onChange={handleCodeProductFilter}
           style={{ width: 260 }}
+        />
+        <Select
+          allowClear
+          placeholder="Filter Status Standarisasi"
+          value={(activeFilters.cost_description || [])[0]}
+          options={costDescriptionFilters.map(option => ({
+            label: option.text,
+            value: option.value,
+          }))}
+          onChange={handleCostDescriptionFilter}
+          style={{ width: 240 }}
         />
         <Search
           placeholder="Cari semua field stok..."

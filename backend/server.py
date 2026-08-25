@@ -919,7 +919,25 @@ def _stock_where_clause(search="", filters=None, code_product_expr="CAST('' AS V
         cost_conditions = []
         stb_values = []
         for value in cost_values:
-            if value == "HPP Metode FIFO":
+            if value == "__STANDARDIZED__":
+                cost_conditions.append("""
+                    EXISTS (
+                        SELECT 1
+                        FROM STANDARBIAYABRGDET sd
+                        WHERE sd.ITEMNO = i.ITEMNO
+                          AND COALESCE(sd.NEWCOST, 0) > 0
+                    )
+                """)
+            elif value == "__UNSTANDARDIZED__":
+                cost_conditions.append("""
+                    NOT EXISTS (
+                        SELECT 1
+                        FROM STANDARBIAYABRGDET sd
+                        WHERE sd.ITEMNO = i.ITEMNO
+                          AND COALESCE(sd.NEWCOST, 0) > 0
+                    )
+                """)
+            elif value == "HPP Metode FIFO":
                 cost_conditions.append("""
                     NOT EXISTS (
                         SELECT 1
@@ -1067,6 +1085,47 @@ def _stock_rows_to_records(rows, cost_description_by_item=None):
     return data
 
 
+def _stock_cost_descriptions(cur, item_nos):
+    descriptions = {}
+    for start in range(0, len(item_nos), 900):
+        item_chunk = item_nos[start:start + 900]
+        in_clause = _build_in_clause(item_chunk)
+        cur.execute(f"""
+            SELECT d.ITEMNO, s.NOSTANDARBRG, s.TGLMULAIBRG, s.TGLSTANDARBRG
+            FROM STANDARBIAYABRG s
+            JOIN STANDARBIAYABRGDET d ON d.NOSTANDARBRG = s.NOSTANDARBRG
+            WHERE d.ITEMNO IN ({in_clause})
+              AND COALESCE(d.NEWCOST, 0) > 0
+            ORDER BY d.ITEMNO, s.TGLMULAIBRG DESC, s.TGLSTANDARBRG DESC, s.NOSTANDARBRG DESC
+        """, item_chunk)
+        standards_by_item = {}
+        for item_no, standard_no, _effective_date, _standard_date in cur.fetchall():
+            key = str(item_no or "").strip()
+            standard_no = str(standard_no or "").strip()
+            if key and standard_no:
+                item_standards = standards_by_item.setdefault(key, [])
+                if standard_no not in item_standards:
+                    item_standards.append(standard_no)
+        for key, standard_nos in standards_by_item.items():
+            description = f"Standarisasi No :{standard_nos[0]}"
+            if len(standard_nos) > 1:
+                description += f" | Sebelumnya :{standard_nos[1]}"
+            descriptions[key] = description
+
+        cur.execute(f"""
+            SELECT ITEMNO, TXDATE, ITEMHISTID
+            FROM ITEMHIST
+            WHERE ITEMNO IN ({in_clause})
+              AND COALESCE(COST, 0) > 0
+            ORDER BY ITEMNO, TXDATE DESC, ITEMHISTID DESC
+        """, item_chunk)
+        for item_no, _tx_date, _itemhist_id in cur.fetchall():
+            key = str(item_no or "").strip()
+            if key and key not in descriptions:
+                descriptions[key] = "HPP Metode FIFO"
+    return descriptions
+
+
 def _stock_item_material_cost_by_item(cur, item_nos):
     fifo_history = {}
     standard_history = {}
@@ -1136,7 +1195,9 @@ def _stock_item_material_cost_by_item(cur, item_nos):
 
 def _is_stock_code_search(value):
     value = str(value or "").strip()
-    return "-" in value and any(char.isalpha() for char in value) and any(char.isdigit() for char in value)
+    if not value or not any(char.isalpha() for char in value):
+        return False
+    return value.endswith("-") or ("-" in value and any(char.isdigit() for char in value))
 
 
 def _get_stock_search_fallback(cur, search, limit, offset, code_product_expr, filters=None, date_from="", date_to=""):
@@ -1144,6 +1205,9 @@ def _get_stock_search_fallback(cur, search, limit, offset, code_product_expr, fi
     if not search:
         return [], 0
     is_code_search = _is_stock_code_search(search)
+    normalized_search = _normalize_stock_code_search(search)
+    normalized_itemno_expr = _stock_normalized_code_expr("i.ITEMNO")
+    normalized_code_product_expr = _stock_normalized_code_expr(code_product_expr)
     token_values = [
         token for token in "".join(ch if ch.isalnum() else " " for ch in search).split()
         if len(token) >= 2
@@ -1161,12 +1225,64 @@ def _get_stock_search_fallback(cur, search, limit, offset, code_product_expr, fi
         token_params = token_values
 
     code_filter_conditions, code_filter_params = _stock_code_product_filter_clause(filters, code_product_expr)
+    extra_filter_conditions = list(code_filter_conditions)
+    extra_filter_params = list(code_filter_params)
+    category_values = (filters or {}).get("category") or []
+    normal_categories = [value for value in category_values if value != "__EMPTY__"]
+    category_conditions = []
+    if normal_categories:
+        category_conditions.append(f"COALESCE(c.NAME, '') IN ({_build_in_clause(normal_categories)})")
+        extra_filter_params.extend(normal_categories)
+    if "__EMPTY__" in category_values:
+        category_conditions.append("COALESCE(c.NAME, '') = ''")
+    if category_conditions:
+        extra_filter_conditions.append(f"({' OR '.join(category_conditions)})")
+    cost_values = (filters or {}).get("cost_description") or []
+    search_cost_conditions = []
+    if "__STANDARDIZED__" in cost_values:
+        search_cost_conditions.append("""
+            EXISTS (
+                SELECT 1 FROM STANDARBIAYABRGDET sd
+                WHERE sd.ITEMNO = i.ITEMNO AND COALESCE(sd.NEWCOST, 0) > 0
+            )
+        """)
+    if "__UNSTANDARDIZED__" in cost_values:
+        search_cost_conditions.append("""
+            NOT EXISTS (
+                SELECT 1 FROM STANDARBIAYABRGDET sd
+                WHERE sd.ITEMNO = i.ITEMNO AND COALESCE(sd.NEWCOST, 0) > 0
+            )
+        """)
+    if "HPP Metode FIFO" in cost_values:
+        search_cost_conditions.append("""
+            NOT EXISTS (
+                SELECT 1 FROM STANDARBIAYABRGDET sd
+                WHERE sd.ITEMNO = i.ITEMNO AND COALESCE(sd.NEWCOST, 0) > 0
+            )
+            AND EXISTS (
+                SELECT 1 FROM ITEMHIST ih
+                WHERE ih.ITEMNO = i.ITEMNO AND COALESCE(ih.COST, 0) > 0
+            )
+        """)
+    if "__EMPTY__" in cost_values:
+        search_cost_conditions.append("""
+            NOT EXISTS (
+                SELECT 1 FROM STANDARBIAYABRGDET sd
+                WHERE sd.ITEMNO = i.ITEMNO AND COALESCE(sd.NEWCOST, 0) > 0
+            )
+            AND NOT EXISTS (
+                SELECT 1 FROM ITEMHIST ih
+                WHERE ih.ITEMNO = i.ITEMNO AND COALESCE(ih.COST, 0) > 0
+            )
+        """)
+    if search_cost_conditions:
+        extra_filter_conditions.append(f"({' OR '.join(search_cost_conditions)})")
     extra_conditions = ""
-    if code_filter_conditions:
-        extra_conditions = " AND " + " AND ".join(code_filter_conditions)
+    if extra_filter_conditions:
+        extra_conditions = " AND " + " AND ".join(extra_filter_conditions)
 
-    if _is_stock_code_search(search):
-        code_prefix = f"{search}-"
+    if is_code_search:
+        code_prefix = search if search.endswith("-") else f"{search}-"
         code_where_sql = f"""
             i.ITEMNO IS NOT NULL
             AND COALESCE(i.SUSPENDED, 0) = 0
@@ -1178,7 +1294,7 @@ def _get_stock_search_fallback(cur, search, limit, offset, code_product_expr, fi
                 OR UPPER({code_product_expr}) STARTING WITH UPPER(?)
             )
         """
-        code_params = code_filter_params + [search, code_prefix, search, code_prefix]
+        code_params = extra_filter_params + [search, code_prefix, search, code_prefix]
         cur.execute(f"""
             SELECT COUNT(*)
             FROM ITEM i
@@ -1207,13 +1323,14 @@ def _get_stock_search_fallback(cur, search, limit, offset, code_product_expr, fi
             return cur.fetchall(), code_total
 
     if is_code_search:
+        code_prefix = search if search.endswith("-") else f"{search}-"
         search_condition = f"""(
             UPPER(i.ITEMNO) = UPPER(?)
             OR UPPER(i.ITEMNO) STARTING WITH UPPER(?)
             OR UPPER({code_product_expr}) = UPPER(?)
             OR UPPER({code_product_expr}) STARTING WITH UPPER(?)
         )"""
-        search_params = [search, f"{search}-", search, f"{search}-"]
+        search_params = [search, code_prefix, search, code_prefix]
     else:
         search_condition = f"""(
             LOWER(i.ITEMNO) CONTAINING LOWER(?)
@@ -1224,7 +1341,10 @@ def _get_stock_search_fallback(cur, search, limit, offset, code_product_expr, fi
             OR {normalized_code_product_expr} CONTAINING ?
             {token_condition}
         )"""
-        search_params = [search, search, search, search] + token_params
+        search_params = [
+            search, search, search, search,
+            normalized_search, normalized_search,
+        ] + token_params
 
     where_sql = f"""
         i.ITEMNO IS NOT NULL
@@ -1232,10 +1352,7 @@ def _get_stock_search_fallback(cur, search, limit, offset, code_product_expr, fi
         {extra_conditions}
         AND {search_condition}
     """
-    params = code_filter_params + [
-        search, search, search, search,
-        normalized_search, normalized_search,
-    ] + token_params
+    params = extra_filter_params + search_params
     cur.execute(f"""
         SELECT COUNT(*)
         FROM ITEM i
@@ -1279,8 +1396,10 @@ def get_stock_data(search="", offset=0, limit=50, filters=None, include_total=Fa
 
         if search:
             rows, total = _get_stock_search_fallback(cur, search, limit, offset, code_product_expr, filters)
+            item_nos = [str(r[0] or "").strip() for r in rows if str(r[0] or "").strip()]
+            cost_description_by_item = _stock_cost_descriptions(cur, item_nos)
             con.close()
-            data = _stock_rows_to_records(rows, {})
+            data = _stock_rows_to_records(rows, cost_description_by_item)
             if include_total:
                 return {"data": data, "total": total}
             return data
@@ -1311,35 +1430,7 @@ def get_stock_data(search="", offset=0, limit=50, filters=None, include_total=Fa
         if search and not rows:
             rows, total = _get_stock_search_fallback(cur, search, limit, offset, code_product_expr, filters)
         item_nos = [str(r[0] or "").strip() for r in rows if str(r[0] or "").strip()]
-        cost_description_by_item = {}
-        if item_nos:
-            for start in range(0, len(item_nos), 900):
-                item_chunk = item_nos[start:start + 900]
-                in_clause = _build_in_clause(item_chunk)
-                cur.execute(f"""
-                    SELECT d.ITEMNO, s.NOSTANDARBRG, s.TGLMULAIBRG, s.TGLSTANDARBRG
-                    FROM STANDARBIAYABRG s
-                    JOIN STANDARBIAYABRGDET d ON d.NOSTANDARBRG = s.NOSTANDARBRG
-                    WHERE d.ITEMNO IN ({in_clause})
-                      AND COALESCE(d.NEWCOST, 0) > 0
-                    ORDER BY d.ITEMNO, s.TGLMULAIBRG DESC, s.TGLSTANDARBRG DESC, s.NOSTANDARBRG DESC
-                """, item_chunk)
-                for item_no, standard_no, _effective_date, _standard_date in cur.fetchall():
-                    key = str(item_no or "").strip()
-                    if key and key not in cost_description_by_item:
-                        cost_description_by_item[key] = f"Standarisasi No :{str(standard_no or '').strip()}"
-
-                cur.execute(f"""
-                    SELECT ITEMNO, TXDATE, ITEMHISTID
-                    FROM ITEMHIST
-                    WHERE ITEMNO IN ({in_clause})
-                      AND COALESCE(COST, 0) > 0
-                    ORDER BY ITEMNO, TXDATE DESC, ITEMHISTID DESC
-                """, item_chunk)
-                for item_no, _tx_date, _itemhist_id in cur.fetchall():
-                    key = str(item_no or "").strip()
-                    if key and key not in cost_description_by_item:
-                        cost_description_by_item[key] = "HPP Metode FIFO"
+        cost_description_by_item = _stock_cost_descriptions(cur, item_nos)
         con.close()
         data = _stock_rows_to_records(rows, cost_description_by_item)
         if include_total:
@@ -1466,7 +1557,16 @@ def get_stock_item_material_data(search="", offset=0, limit=50, filters=None, so
     return {"data": data, "total": int(result.get("total") or 0)}
 
 
-def get_stock_summary():
+_STOCK_SUMMARY_CACHE = {}
+
+
+def get_stock_summary(categories=None):
+    category_key = tuple(sorted(
+        str(value).strip() for value in (categories or []) if str(value).strip()
+    ))
+    cached_summary = _STOCK_SUMMARY_CACHE.get(category_key)
+    if cached_summary and time.time() < cached_summary["expires_at"]:
+        return cached_summary["data"]
     try:
         con = fdb.connect(**DB_CONFIG)
         cur = con.cursor()
@@ -1475,13 +1575,18 @@ def get_stock_summary():
             AND COALESCE(i.SUSPENDED, 0) = 0
             AND COALESCE(UPPER(TRIM(c.NAME)), '') NOT IN ('CF', 'MF')
         """
+        categories = list(category_key)
+        base_params = []
+        if categories:
+            base_where += f" AND COALESCE(c.NAME, '') IN ({_build_in_clause(categories)})"
+            base_params.extend(categories)
 
         cur.execute(f"""
             SELECT COUNT(*)
             FROM ITEM i
             LEFT JOIN ITEMCATEGORY c ON c.CATEGORYID = i.CATEGORYID
             WHERE {base_where}
-        """)
+        """, base_params)
         total_items = int(cur.fetchone()[0] or 0)
 
         cur.execute(f"""
@@ -1491,7 +1596,7 @@ def get_stock_summary():
             WHERE {base_where}
             GROUP BY COALESCE(c.NAME, 'Tanpa Kategori')
             ORDER BY COUNT(*) DESC, COALESCE(c.NAME, 'Tanpa Kategori')
-        """)
+        """, base_params)
         categories = [
             {"category": str(category or "Tanpa Kategori").strip(), "count": int(count or 0)}
             for category, count in cur.fetchall()
@@ -1504,28 +1609,53 @@ def get_stock_summary():
             JOIN STANDARBIAYABRGDET d ON d.ITEMNO = i.ITEMNO
             WHERE {base_where}
               AND COALESCE(d.NEWCOST, 0) > 0
-        """)
+        """, base_params)
         standardized_items = int(cur.fetchone()[0] or 0)
 
-        stock_qty_expr = _easy_stock_expr("i.ITEMNO")
         cur.execute(f"""
-            SELECT COUNT(*)
+            SELECT i.ITEMNO, COALESCE(i.MINIMUMQTY, 0)
             FROM ITEM i
             LEFT JOIN ITEMCATEGORY c ON c.CATEGORYID = i.CATEGORYID
             WHERE {base_where}
               AND COALESCE(i.MINIMUMQTY, 0) > 0
-              AND {stock_qty_expr} < COALESCE(i.MINIMUMQTY, 0)
-        """)
-        below_minimum_items = int(cur.fetchone()[0] or 0)
+        """, base_params)
+        minimum_by_item = {
+            str(item_no or "").strip(): float(minimum_qty or 0)
+            for item_no, minimum_qty in cur.fetchall()
+            if str(item_no or "").strip()
+        }
+        stock_by_item = {}
+        minimum_item_nos = list(minimum_by_item)
+        for start in range(0, len(minimum_item_nos), 900):
+            item_chunk = minimum_item_nos[start:start + 900]
+            cur.execute(f"""
+                SELECT ITEMNO, SUM(QTY)
+                FROM SALDO_WHS
+                WHERE ITEMNO IN ({_build_in_clause(item_chunk)})
+                GROUP BY ITEMNO
+            """, item_chunk)
+            for item_no, quantity in cur.fetchall():
+                stock_by_item[str(item_no or "").strip()] = float(quantity or 0)
+        below_minimum_items = sum(
+            1
+            for item_no, minimum_qty in minimum_by_item.items()
+            if stock_by_item.get(item_no, 0) < minimum_qty
+        )
 
         con.close()
-        return {
+        result = {
             "total_items": total_items,
             "category_count": len(categories),
             "categories": categories,
             "standardized_items": standardized_items,
+            "unstandardized_items": max(total_items - standardized_items, 0),
             "below_minimum_items": below_minimum_items,
         }
+        _STOCK_SUMMARY_CACHE[category_key] = {
+            "data": result,
+            "expires_at": time.time() + 300,
+        }
+        return result
     except Exception as e:
         print(f"Error get_stock_summary: {e}")
         return {
@@ -1533,6 +1663,7 @@ def get_stock_summary():
             "category_count": 0,
             "categories": [],
             "standardized_items": 0,
+            "unstandardized_items": 0,
             "below_minimum_items": 0,
         }
 
@@ -1731,7 +1862,9 @@ def api_stock_export():
 def api_stock_summary():
     if not check_permission("stock"):
         return jsonify({"message": "Akses ditolak"}), 403
-    return jsonify(get_stock_summary())
+    return jsonify(get_stock_summary(
+        _split_filter_values(request.args.get("category"))
+    ))
 
 
 @app.route("/api/stock/filter-options")
