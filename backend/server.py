@@ -192,6 +192,11 @@ def configure_swagger(app):
         "string": "string",
     }
 
+    try:
+        from integration_api import ALLOWED_PARAMS, COMMON_PARAMS
+    except ImportError:
+        ALLOWED_PARAMS, COMMON_PARAMS = {}, set()
+
     for rule in app.url_map.iter_rules():
         if rule.endpoint.startswith(("static", "flasgger.")):
             continue
@@ -221,6 +226,19 @@ def configure_swagger(app):
                 "required": True,
                 "type": converter_types.get(converter_name, "string"),
             })
+
+        # Inject query params for integration_api
+        if path.startswith("/api/integration/v1/"):
+            resource = path.split("/api/integration/v1/")[-1].split("/")[0]
+            allowed = ALLOWED_PARAMS.get(resource, set()) | COMMON_PARAMS
+            for q_param in sorted(allowed):
+                param_type = "integer" if q_param in {"limit", "offset", "page", "skip_count"} else "string"
+                parameters.append({
+                    "name": q_param,
+                    "in": "query",
+                    "required": False,
+                    "type": param_type,
+                })
 
         operations = {
             method.lower(): {
