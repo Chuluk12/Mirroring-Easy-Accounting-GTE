@@ -1,4 +1,5 @@
 from flask import Flask, render_template, jsonify, request
+from flasgger import Swagger
 from flask_socketio import SocketIO
 from flask_cors import CORS
 from flask_jwt_extended import (
@@ -53,6 +54,28 @@ def env_list(name, default="*"):
 
 
 app = Flask(__name__)
+SWAGGER_TEMPLATE = {
+    "swagger": "2.0",
+    "info": {
+        "title": "Easy Dashboard API",
+        "description": "Dokumentasi API Easy Dashboard",
+        "version": "1.0.0",
+    },
+    "basePath": "/",
+    "securityDefinitions": {
+        "ApiKey": {
+            "type": "apiKey",
+            "name": "X-API-Key",
+            "in": "header",
+        },
+        "Bearer": {
+            "type": "apiKey",
+            "name": "Authorization",
+            "in": "header",
+            "description": "JWT token format: Bearer <token>",
+        },
+    },
+}
 app.logger.setLevel(
     getattr(logging, os.getenv("EASY_LOG_LEVEL", "INFO").upper(), logging.INFO)
 )
@@ -104,6 +127,21 @@ register_integration_api(app)
 
 @app.route("/health")
 def health():
+    """
+    Health check endpoint.
+    ---
+    tags:
+      - System
+    responses:
+      200:
+        description: Backend aktif
+        schema:
+          type: object
+          properties:
+            status:
+              type: string
+              example: ok
+    """
     return jsonify({"status": "ok"})
 
 if len(app.config["JWT_SECRET_KEY"]) < 32:
@@ -143,6 +181,65 @@ NATS_SUBJECT = os.getenv("NATS_SUBJECT", "stock.material.sync")
 NATS_SYNC_INTERVAL = max(int(os.getenv("NATS_SYNC_INTERVAL", "60")), 10)
 NATS_LIMIT = max(int(os.getenv("NATS_LIMIT", "1000")), 1)
 NATS_CHUNK_SIZE = max(int(os.getenv("NATS_CHUNK_SIZE", "100")), 1)
+
+
+def configure_swagger(app):
+    paths = {}
+    converter_types = {
+        "int": "integer",
+        "float": "number",
+        "path": "string",
+        "string": "string",
+    }
+
+    for rule in app.url_map.iter_rules():
+        if rule.endpoint.startswith(("static", "flasgger.")):
+            continue
+
+        path = re.sub(r"<(?:(\w+):)?(\w+)>", r"{\2}", rule.rule)
+        methods = sorted(rule.methods - {"HEAD", "OPTIONS"})
+        if not methods:
+            continue
+
+        tag = "Integration" if path.startswith("/api/integration/") else "API"
+        if path == "/health":
+            tag = "System"
+
+        security = []
+        if path.startswith("/api/integration/"):
+            security = [{"ApiKey": []}]
+        elif path.startswith("/api/"):
+            security = [{"Bearer": []}]
+
+        parameters = []
+        for argument in sorted(rule.arguments):
+            converter = rule._converters.get(argument)
+            converter_name = converter.__class__.__name__.replace("Converter", "").lower() if converter else "string"
+            parameters.append({
+                "name": argument,
+                "in": "path",
+                "required": True,
+                "type": converter_types.get(converter_name, "string"),
+            })
+
+        operations = {
+            method.lower(): {
+                "tags": [tag],
+                "summary": rule.endpoint,
+                "parameters": parameters,
+                "security": security,
+                "responses": {
+                    "200": {"description": "Success"},
+                    "400": {"description": "Bad request"},
+                    "401": {"description": "Unauthorized"},
+                    "500": {"description": "Server error"},
+                },
+            }
+            for method in methods
+        }
+        paths.setdefault(path, {}).update(operations)
+
+    Swagger(app, template={**SWAGGER_TEMPLATE, "paths": paths})
 
 
 def connect_easy_db(retries=2, delay=0.4):
@@ -14111,6 +14208,8 @@ def nats_sync():
         except Exception as exc:
             app.logger.exception("NATS sync gagal: %s", exc)
         time.sleep(NATS_SYNC_INTERVAL)
+
+configure_swagger(app)
 
 
 if __name__ == "__main__":
