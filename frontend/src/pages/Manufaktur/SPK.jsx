@@ -295,7 +295,7 @@ export default function SPK() {
           </div>
         </div>
         <h2>Rincian Material Formula</h2>
-        <table>
+        <table class="material-table">
           <colgroup>
             <col class="number-col"><col><col><col><col><col><col><col><col><col class="note-col">
           </colgroup>
@@ -317,6 +317,22 @@ export default function SPK() {
         <div class="approval-section">
           <div class="approval-item">
             <div class="approval-title">PIC Produksi</div>
+            <div class="approval-signature"></div>
+            <div class="approval-details">
+              <div class="approval-detail-row"><span>Nama</span><span>:</span><span class="approval-detail-line"></span></div>
+              <div class="approval-detail-row"><span>Tanggal</span><span>:</span><span class="approval-detail-line"></span></div>
+            </div>
+          </div>
+          <div class="approval-item">
+            <div class="approval-title">Leader Produksi</div>
+            <div class="approval-signature"></div>
+            <div class="approval-details">
+              <div class="approval-detail-row"><span>Nama</span><span>:</span><span class="approval-detail-line"></span></div>
+              <div class="approval-detail-row"><span>Tanggal</span><span>:</span><span class="approval-detail-line"></span></div>
+            </div>
+          </div>
+          <div class="approval-item">
+            <div class="approval-title">Spv Produksi</div>
             <div class="approval-signature"></div>
             <div class="approval-details">
               <div class="approval-detail-row"><span>Nama</span><span>:</span><span class="approval-detail-line"></span></div>
@@ -395,7 +411,12 @@ export default function SPK() {
               .manual-row { height: 30px; }
               .note-col { width: 18%; }
               .note-cell { min-width: 130px; }
-              .approval-section { display: grid; grid-template-columns: repeat(3, 210px); justify-content: end; column-gap: 40px; margin: 28px 16px 8px 0; break-inside: avoid; page-break-inside: avoid; }
+              .material-table { font-size: 9px; line-height: 1.2; }
+              .material-table th, .material-table td { padding: 3px 5px; }
+              .material-table th { font-size: 9px; }
+              .material-table .actual-cell { height: 22px; }
+              .material-table .manual-row { height: 22px; }
+              .approval-section { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); column-gap: 18px; margin: 18px 0 8px; break-inside: avoid; page-break-inside: avoid; }
               .approval-item { text-align: center; }
               .approval-title { font-weight: 700; }
               .approval-signature { height: 64px; }
