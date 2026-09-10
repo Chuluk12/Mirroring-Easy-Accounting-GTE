@@ -4,7 +4,7 @@ import {
   Select,
 } from 'antd'
 import {
-  CheckCircleOutlined, ClockCircleOutlined, FileExcelOutlined, PrinterOutlined, ReloadOutlined, SearchOutlined, PartitionOutlined,
+  CheckCircleOutlined, ClockCircleOutlined, FileExcelOutlined, HistoryOutlined, PrinterOutlined, ReloadOutlined, SearchOutlined, PartitionOutlined,
 } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import api, { getApiErrorMessage } from '../../api/client'
@@ -85,6 +85,7 @@ const MATERIAL_DETAIL_EXPORT_COLS = [
   { key: 'formula_qty', label: 'Qty Formula', type: 'number' },
   { key: 'formula_qty_for_spk_qty', label: 'Qty Formula x Qty SPK', type: 'number' },
   { key: 'spk_qty', label: 'Qty di SPK', type: 'number' },
+  { key: 'previous_spk_qty', label: 'Qty Sebelumnya', type: 'number' },
   { key: 'spm_qty', label: 'Qty di SPM', type: 'number' },
   { key: 'spm_spk_qty_diff', label: 'Selisih SPM-SPK', type: 'number' },
   { key: 'unit', label: 'UoM Material' },
@@ -199,6 +200,9 @@ export default function MonitoringFormula() {
   const [exporting, setExporting] = useState(false)
   const [search, setSearch] = useState('')
   const [status, setStatus] = useState('')
+  const [product, setProduct] = useState('')
+  const [productOptions, setProductOptions] = useState([])
+  const [productsLoading, setProductsLoading] = useState(true)
   const [dateRange, setDateRange] = useState(getDefaultDateRange)
   const [pagination, setPagination] = useState({ current: 1, pageSize: DEFAULT_PAGE_SIZE, total: 0 })
   const [printModalOpen, setPrintModalOpen] = useState(false)
@@ -209,6 +213,7 @@ export default function MonitoringFormula() {
 
   const searchRef = useRef('')
   const statusRef = useRef('')
+  const productRef = useRef('')
   const dateRangeRef = useRef(getDefaultDateRange())
   const pageRef = useRef(1)
   const pageSizeRef = useRef(DEFAULT_PAGE_SIZE)
@@ -236,6 +241,7 @@ export default function MonitoringFormula() {
       const params = { offset: (page - 1) * pageSize, limit: pageSize, skip_count: 1 }
       if (searchVal) params.search = searchVal
       if (statusVal) params.status = statusVal
+      if (productRef.current) params.product = productRef.current
       if (dates?.[0]) params.date_from = dates[0].format('YYYY-MM-DD')
       if (dates?.[1]) params.date_to = dates[1].format('YYYY-MM-DD')
 
@@ -267,6 +273,18 @@ export default function MonitoringFormula() {
     fetchData(1, DEFAULT_PAGE_SIZE, '', dateRangeRef.current, statusRef.current)
   }, [fetchData])
 
+  useEffect(() => {
+    let active = true
+    api.get('/api/monitoring-formula/products').then(res => {
+      if (active) setProductOptions((res.data.data || []).map(value => ({ value, label: value })))
+    }).catch(error => {
+      if (active) message.error(getApiErrorMessage(error, 'Gagal memuat pilihan Product'))
+    }).finally(() => {
+      if (active) setProductsLoading(false)
+    })
+    return () => { active = false }
+  }, [])
+
   useVisiblePolling(() => {
     fetchData(pageRef.current, pageSizeRef.current, searchRef.current, dateRangeRef.current, statusRef.current, false)
   }, 60000)
@@ -293,13 +311,22 @@ export default function MonitoringFormula() {
     fetchData(1, pageSizeRef.current, searchRef.current, dateRangeRef.current, value)
   }
 
+  const handleProduct = value => {
+    productRef.current = value || ''
+    setProduct(value || '')
+    pageRef.current = 1
+    fetchData(1, pageSizeRef.current, searchRef.current, dateRangeRef.current, statusRef.current)
+  }
+
   const handleReset = () => {
     const currentMonth = getCurrentMonthRange()
     searchRef.current = ''
     statusRef.current = ''
+    productRef.current = ''
     dateRangeRef.current = currentMonth
     setSearch('')
     setStatus('')
+    setProduct('')
     setDateRange(currentMonth)
     pageRef.current = 1
     fetchData(1, DEFAULT_PAGE_SIZE, '', currentMonth, '')
@@ -537,6 +564,7 @@ export default function MonitoringFormula() {
           <td>${escapeHtml(item.material_name)}</td>
           <td class="right">${item.formula_qty_for_spk_qty === null || item.formula_qty_for_spk_qty === undefined ? '-' : escapeHtml(formatQty(item.formula_qty_for_spk_qty))}</td>
           <td class="right">${escapeHtml(formatQty(item.spk_qty))}</td>
+          <td class="right">${escapeHtml(formatQty(item.previous_spk_qty))}</td>
           <td class="right">${escapeHtml(formatQty(item.spm_qty))}</td>
           <td>${escapeHtml(item.unit || '')}</td>
           <td class="right ${qtyDiff > 0 ? 'danger' : ''}">${qtyDiff === null ? '-' : `${qtyDiff > 0 ? '+' : ''}${escapeHtml(formatQty(qtyDiff))}`}</td>
@@ -569,12 +597,12 @@ export default function MonitoringFormula() {
           <h2>Rincian Material Formula</h2>
           <table>
             <colgroup>
-              <col><col><col><col><col><col><col><col class="note-col">
+              <col><col><col><col><col><col><col><col><col class="note-col">
             </colgroup>
             <thead>
-              <tr><th>No Barang</th><th>Nama Material</th><th>Formula</th><th>SPK</th><th>SPM</th><th>UOM</th><th>Selisih SPM-SPK</th><th>Note</th></tr>
+              <tr><th>No Barang</th><th>Nama Material</th><th>Formula</th><th>SPK</th><th>Qty Sebelumnya</th><th>SPM</th><th>UOM</th><th>Selisih SPM-SPK</th><th>Note</th></tr>
             </thead>
-            <tbody>${materialRows || '<tr><td colspan="8">Tidak ada data material</td></tr>'}</tbody>
+            <tbody>${materialRows || '<tr><td colspan="9">Tidak ada data material</td></tr>'}</tbody>
           </table>
           <h2>Rincian Biaya Produksi</h2>
           <table>
@@ -1065,6 +1093,36 @@ export default function MonitoringFormula() {
       render: (value, record) => `${formatQty(value)} ${value === null || value === undefined ? '' : record.unit || ''}`,
     },
     {
+      title: 'Qty Sebelumnya',
+      dataIndex: 'previous_spk_qty',
+      width: 150,
+      align: 'right',
+      render: (value, record) => {
+        if (value === null || value === undefined) return <Text type="secondary">-</Text>
+        const content = (
+          <Space direction="vertical" style={{ maxHeight: 320, overflowY: 'auto' }}>
+            {(record.spk_qty_history || []).map((item, index) => (
+              <Space key={`${item.detected_at}-${index}`}>
+                <Text type="secondary">{dayjs(item.detected_at).format('DD/MM/YYYY HH:mm')}</Text>
+                <Text>
+                  {item.old_qty === null || item.old_qty === undefined
+                    ? `Baseline ${formatQty(item.new_qty)} ${item.unit || ''}`
+                    : `${formatQty(item.old_qty)} → ${formatQty(item.new_qty)} ${item.unit || ''}`}
+                </Text>
+              </Space>
+            ))}
+          </Space>
+        )
+        return (
+          <Popover title="Riwayat Qty di SPK" content={content} trigger="click" placement="left">
+            <Button type="link" size="small" icon={<HistoryOutlined />}>
+              {formatQty(value)} {record.unit || ''}
+            </Button>
+          </Popover>
+        )
+      },
+    },
+    {
       title: 'Qty di SPM',
       dataIndex: 'spm_qty',
       width: 120,
@@ -1406,6 +1464,18 @@ export default function MonitoringFormula() {
               onChange={handleStatus}
               style={{ width: 145 }}
             />
+            <Select
+              aria-label="Filter Product"
+              placeholder="Semua Product"
+              value={product || undefined}
+              options={productOptions}
+              loading={productsLoading}
+              showSearch
+              allowClear
+              optionFilterProp="label"
+              onChange={handleProduct}
+              style={{ width: 200 }}
+            />
             <Search
               prefix={<SearchOutlined />}
               placeholder="Cari SPK, barang, pesanan..."
@@ -1613,7 +1683,7 @@ export default function MonitoringFormula() {
           margin-bottom: 12px;
         }
         .monitoring-formula-material-table {
-          width: 2640px;
+          width: 2790px;
         }
         .monitoring-formula-production-table {
           width: 1895px;

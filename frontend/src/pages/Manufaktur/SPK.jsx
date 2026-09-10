@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 import {
   Table, Input, Card, DatePicker, Space, Tag, Tooltip, Popover, Select,
   Statistic, Row, Col, Typography, Button, Badge, Progress, Modal, Checkbox, message
@@ -89,6 +89,10 @@ export default function SPK() {
   const [search, setSearch]         = useState('')
   const [dateRange, setDateRange]   = useState(getCurrentMonthRange)
   const [status, setStatus]         = useState('')
+  const [product, setProduct] = useState('')
+  const [productOptions, setProductOptions] = useState([])
+  const [productsLoading, setProductsLoading] = useState(true)
+  const productRef = useRef('')
   const [exporting, setExporting]   = useState(false)
   const [formulaDetails, setFormulaDetails] = useState({})
   const [formulaLoading, setFormulaLoading] = useState({})
@@ -115,6 +119,7 @@ export default function SPK() {
       if (dates[0])  params.date_from = dates[0].format('YYYY-MM-DD')
       if (dates[1])  params.date_to   = dates[1].format('YYYY-MM-DD')
       if (statusVal) params.status    = statusVal
+      if (productRef.current) params.product = productRef.current
 
       const res  = await api.get('/api/spk', { params })
       const rows = res.data.data || []
@@ -141,6 +146,18 @@ export default function SPK() {
   useEffect(() => {
     fetchData()
   }, [fetchData])
+
+  useEffect(() => {
+    let active = true
+    api.get('/api/monitoring-formula/products').then(res => {
+      if (active) setProductOptions((res.data.data || []).map(value => ({ value, label: value })))
+    }).catch(() => {
+      if (active) message.error('Gagal memuat pilihan Product')
+    }).finally(() => {
+      if (active) setProductsLoading(false)
+    })
+    return () => { active = false }
+  }, [])
 
   useVisiblePolling(() => {
     fetchData(pagination.current, pagination.pageSize, search, dateRange, status, false)
@@ -182,10 +199,17 @@ export default function SPK() {
   const handleSearch     = (val) => { setSearch(val); fetchData(1, pagination.pageSize, val, dateRange, status) }
   const handleDateChange = (dates) => { setDateRange(dates || [null, null]); fetchData(1, pagination.pageSize, search, dates || [null, null], status) }
   const handleStatus     = (val) => { setStatus(val); fetchData(1, pagination.pageSize, search, dateRange, val) }
+  const handleProduct = value => {
+    productRef.current = value || ''
+    setProduct(value || '')
+    fetchData(1, pagination.pageSize, search, dateRange, status)
+  }
   const handleReset      = () => {
     const currentMonth = getCurrentMonthRange()
     setSearch('')
     setStatus('')
+    productRef.current = ''
+    setProduct('')
     setDateRange(currentMonth)
     fetchData(1, pagination.pageSize, '', currentMonth, '')
   }
@@ -196,6 +220,7 @@ export default function SPK() {
       if (dateRange[0]) params.date_from = dateRange[0].format('YYYY-MM-DD')
       if (dateRange[1]) params.date_to = dateRange[1].format('YYYY-MM-DD')
       if (status) params.status = status
+      if (productRef.current) params.product = productRef.current
       const res = await api.get('/api/spk/export', { params })
       return (res.data.data || []).map(row => ({
         ...row,
@@ -468,6 +493,7 @@ export default function SPK() {
     setPrintLoading(true)
     try {
       const params = { offset: 0, limit: 500, search: record.no_spk }
+      if (productRef.current) params.product = productRef.current
       if (dateRange?.[0]) params.date_from = dateRange[0].format('YYYY-MM-DD')
       if (dateRange?.[1]) params.date_to = dateRange[1].format('YYYY-MM-DD')
       const res = await api.get('/api/spk', { params })
@@ -950,6 +976,18 @@ export default function SPK() {
               options={STATUS_FILTER_OPTIONS}
               onChange={handleStatus}
               style={{ width: 150 }}
+            />
+            <Select
+              aria-label="Filter Product"
+              placeholder="Semua Product"
+              value={product || undefined}
+              options={productOptions}
+              loading={productsLoading}
+              showSearch
+              allowClear
+              optionFilterProp="label"
+              onChange={handleProduct}
+              style={{ width: 200 }}
             />
             <Search
               placeholder="Cari SPK, pesanan, no barang..."

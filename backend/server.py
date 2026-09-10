@@ -8917,7 +8917,14 @@ def api_standarisasi_harga_details(standar_id):
         return jsonify({"data": [], "total": 0, "error": str(e)}), 500
 
 
-def _monitoring_formula_where_clause(search="", date_from="", date_to="", wodet_id="", no_spk=""):
+def _monitoring_formula_product_expr(cur):
+    column = _siinas_pick_column(
+        _get_table_columns(cur, "ITEM"), ("ITEMRESERVED6", "RESERVED6", "PRODUCT")
+    )
+    return f"TRIM(i.{column})" if column else "CAST('' AS VARCHAR(255))"
+
+
+def _monitoring_formula_where_clause(search="", date_from="", date_to="", wodet_id="", no_spk="", product="", product_expr="CAST('' AS VARCHAR(255))"):
     conditions = ["1=1"]
     params = []
 
@@ -8953,6 +8960,10 @@ def _monitoring_formula_where_clause(search="", date_from="", date_to="", wodet_
     if no_spk:
         conditions.append("w.WONO = ?")
         params.append(no_spk)
+
+    if product:
+        conditions.append(f"{product_expr} = ?")
+        params.append(product)
 
     return " AND ".join(conditions), params
 
@@ -9909,6 +9920,32 @@ def api_monitoring_formula_debug_status():
         return jsonify({"message": str(e)}), 500
 
 
+@app.route("/api/monitoring-formula/products")
+@jwt_required()
+def api_monitoring_formula_products():
+    if not check_permission("spk"):
+        return jsonify({"message": "Akses ditolak"}), 403
+    con = None
+    try:
+        con = fdb.connect(**DB_CONFIG)
+        cur = con.cursor()
+        product_expr = _monitoring_formula_product_expr(cur)
+        cur.execute(f"""
+            SELECT DISTINCT {product_expr} AS PRODUCT
+            FROM ITEM i
+            WHERE {product_expr} IS NOT NULL AND {product_expr} <> ''
+              AND EXISTS (SELECT 1 FROM WODET det WHERE det.ITEMNO = i.ITEMNO)
+            ORDER BY 1
+        """)
+        return jsonify({"data": [row[0].strip() for row in cur.fetchall()]})
+    except Exception as e:
+        print(f"Error api_monitoring_formula_products: {e}")
+        return jsonify({"data": [], "error": str(e)}), 500
+    finally:
+        if con is not None:
+            con.close()
+
+
 @app.route("/api/monitoring-formula")
 @jwt_required()
 def api_monitoring_formula():
@@ -9921,6 +9958,7 @@ def api_monitoring_formula():
         status = request.args.get("status", "").strip()
         wodet_id_filter = request.args.get("wodet_id", "").strip()
         no_spk_filter = request.args.get("no_spk", "").strip()
+        product_filter = request.args.get("product", "").strip()
         sort_by = request.args.get("sort_by", "").strip()
         sort_order = request.args.get("sort_order", "").strip().lower()
         offset = int(request.args.get("offset", 0))
@@ -9949,7 +9987,9 @@ def api_monitoring_formula():
         con = fdb.connect(**DB_CONFIG)
         cur = con.cursor()
         where_sql, params_where = _monitoring_formula_where_clause(
-            search, date_from, date_to, wodet_id_filter, no_spk_filter
+            search, date_from, date_to, wodet_id_filter, no_spk_filter,
+            product=product_filter,
+            product_expr=_monitoring_formula_product_expr(cur) if product_filter else "CAST('' AS VARCHAR(255))",
         )
         wodet_columns = set(_get_table_columns(cur, "WODET"))
         def _truthy_sql_expr(alias, column):
@@ -10439,6 +10479,11 @@ def api_spk():
         if status_condition:
             conditions.append(status_condition)
 
+        product = request.args.get("product", "").strip()
+        if product:
+            conditions.append(f"{_monitoring_formula_product_expr(cur)} = ?")
+            params_where.append(product)
+
         where_sql = " AND ".join(conditions)
 
         total_spk = total_rows = spk_selesai = spk_berjalan = item_selesai_gp = None
@@ -10750,6 +10795,11 @@ def api_spk_export():
         status_condition = _spk_item_status_condition(status)
         if status_condition:
             conditions.append(status_condition)
+
+        product = request.args.get("product", "").strip()
+        if product:
+            conditions.append(f"{_monitoring_formula_product_expr(cur)} = ?")
+            params_where.append(product)
 
         where_sql = " AND ".join(conditions)
         cur.execute(f"""

@@ -9,6 +9,24 @@ import server
 
 
 class SpkIntegrationTest(unittest.TestCase):
+    def test_monitoring_formula_filters_finished_item_product(self):
+        where_sql, params = server._monitoring_formula_where_clause(
+            no_spk="SPK-001", product="Product O'Reilly",
+            product_expr="TRIM(i.ITEMRESERVED6)",
+        )
+        self.assertIn("TRIM(i.ITEMRESERVED6) = ?", where_sql)
+        self.assertNotIn("Product O'Reilly", where_sql)
+        self.assertEqual(params, ["SPK-001", "Product O'Reilly"])
+
+    @patch.object(server, "_get_table_columns")
+    def test_product_uses_reserve_six_before_product_column(self, columns):
+        columns.return_value = ["ITEMRESERVED6", "PRODUCT"]
+        self.assertEqual(server._monitoring_formula_product_expr(None), "TRIM(i.ITEMRESERVED6)")
+        columns.return_value = ["RESERVED6"]
+        self.assertEqual(server._monitoring_formula_product_expr(None), "TRIM(i.RESERVED6)")
+        columns.return_value = []
+        self.assertEqual(server._monitoring_formula_product_expr(None), "CAST('' AS VARCHAR(255))")
+
     def test_monitoring_formula_filters_exact_spk(self):
         where_sql, params = server._monitoring_formula_where_clause(
             no_spk="GTE-SPK-261661"
