@@ -380,7 +380,7 @@ MODULE_COLUMNS = {
         "sumber_harga",
     ],
     "monitoring_formula": [
-        "wodet_id", "no_spk", "tanggal", "no_barang", "nama_barang", "qty_spk",
+        "wodet_id", "no_spk", "tanggal", "product_code", "no_barang", "nama_barang", "qty_spk",
         "uom", "no_formula", "formula_material_count", "spk_material_count",
         "spm_material_count", "formula_vs_spk_status", "spk_vs_spm_status",
         "material_stock_status", "material_stock_shortage_count",
@@ -489,7 +489,7 @@ MODULE_REQUIRED_RESPONSE_KEYS = {
     "standarisasi_harga": ["standar_id", "no_standarisasi"],
     "fifo": ["no_barang"],
     "monitoring_formula": [
-        "wodet_id", "no_spk", "no_barang", "materials", "production_details",
+        "wodet_id", "no_spk", "no_barang", "product_code", "materials", "production_details",
         "tgl_selesai", "qty_hasil_produksi", "production_progress", "production_results",
         "qty_berhenti_produksi",
         "total_mat_plan", "total_mat_keluar", "material_progress", "production_status",
@@ -9986,6 +9986,7 @@ def api_monitoring_formula():
 
         con = fdb.connect(**DB_CONFIG)
         cur = con.cursor()
+        product_code_expr = _monitoring_formula_product_expr(cur)
         where_sql, params_where = _monitoring_formula_where_clause(
             search, date_from, date_to, wodet_id_filter, no_spk_filter,
             product=product_filter,
@@ -10047,6 +10048,7 @@ def api_monitoring_formula():
                     w.WODATE,
                     det.ITEMNO,
                     COALESCE(i.ITEMDESCRIPTION, det.JOBDESCRIPTION) AS ITEM_NAME,
+                    {product_code_expr} AS PRODUCT_CODE,
                     det.QUANTITY,
                     det.UNIT,
                     so.SONO,
@@ -10114,7 +10116,8 @@ def api_monitoring_formula():
                 COALESCE(rbm.TOTAL_MAT_KELUAR, rbw.TOTAL_MAT_KELUAR, 0) AS TOTAL_MAT_KELUAR
                 ,p.WODET_STATUS,
                 p.IS_WORK_ORDER_CLOSED,
-                p.JOBDESCRIPTION
+                p.JOBDESCRIPTION,
+                p.PRODUCT_CODE
             FROM page_rows p
             LEFT JOIN result_agg ra           ON ra.WODETID  = p.WODET_ID
             LEFT JOIN mat_agg ma              ON ma.WODETID  = p.WODET_ID
@@ -10174,6 +10177,7 @@ def api_monitoring_formula():
                 "wodet_status": wodet_status,
                 "is_work_order_closed": is_work_order_closed,
                 "keterangan": str(row[16] or "").strip(),
+                "product_code": str(row[17] or "").strip(),
                 "qty_berhenti_produksi": max(qty_spk - total_qty_hasil, 0) if is_work_order_closed else 0.0,
             })
 
@@ -10364,6 +10368,7 @@ def api_monitoring_formula():
                 "wodet_id": wodet_id,
                 "no_spk": row["no_spk"],
                 "tanggal": row["tanggal"],
+                "product_code": row["product_code"],
                 "no_barang": row["item_no"],
                 "nama_barang": row["item_name"],
                 "qty_spk": row["qty_spk"],

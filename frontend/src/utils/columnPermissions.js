@@ -26,6 +26,6 @@ export function filterExportColumnsByPermission(module, columns, user) {
       && column.key.startsWith('qty_')
       && allowedSet.has('warehouse_quantities')
     ) return true
-    return allowedSet.has(column.key)
+    return allowedSet.has(column.permissionKey || column.key)
   })
 }

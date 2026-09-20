@@ -31,38 +31,21 @@ const STATUS_OPTIONS = [
 
 const MONITORING_FORMULA_EXPORT_COLS = [
   { key: 'no_spk', label: 'No SPK' },
-  { key: 'tanggal', label: 'Tanggal SPK', type: 'date' },
-  { key: 'no_hasil_produksi', label: 'No Hasil Produksi / GP' },
-  { key: 'tgl_selesai', label: 'Tgl Selesai Produksi', type: 'date' },
-  { key: 'no_barang', label: 'No Barang' },
-  { key: 'nama_barang', label: 'Nama Barang' },
-  { key: 'qty_spk', label: 'Qty SPK', type: 'number' },
-  { key: 'qty_hasil_produksi', label: 'Hasil Produksi / GP', type: 'number' },
-  { key: 'uom', label: 'UoM' },
-  { key: 'production_progress', label: 'Progress Produksi (%)', type: 'number' },
-  { key: 'total_mat_plan', label: 'Total Bahan Rencana', type: 'number' },
-  { key: 'total_mat_keluar', label: 'Total Bahan Keluar', type: 'number' },
-  { key: 'material_progress', label: 'Progress Bahan (%)', type: 'number' },
-  { key: 'production_status', label: 'Status Barang' },
-  { key: 'no_formula', label: 'No Formula' },
-  { key: 'formula_material_count', label: 'Material Formula', type: 'number' },
-  { key: 'spk_material_count', label: 'Material SPK', type: 'number' },
-  { key: 'spm_material_count', label: 'Material SPM', type: 'number' },
-  { key: 'formula_material_cost', label: 'Biaya Material Formula', type: 'number' },
-  { key: 'formula_production_cost', label: 'Biaya Produksi Formula', type: 'number' },
-  { key: 'formula_total_cost', label: 'Total Biaya Formula', type: 'number' },
-  { key: 'spk_material_cost', label: 'Biaya Material SPK', type: 'number' },
-  { key: 'spk_production_cost', label: 'Biaya Produksi SPK', type: 'number' },
-  { key: 'spk_total_cost', label: 'Total Biaya SPK', type: 'number' },
-  { key: 'hpp_total_actual', label: 'Total HPP Aktual', type: 'number' },
-  { key: 'hpp_per_unit', label: 'HPP per Unit', type: 'number' },
-  { key: 'hpp_per_unit_spk', label: 'Estimasi HPP per Unit SPK', type: 'number' },
-  { key: 'hpp_status', label: 'Status HPP' },
-  { key: 'total_cost_diff', label: 'Selisih Total Biaya', type: 'number' },
-  { key: 'formula_vs_spk_status', label: 'Formula vs SPK' },
-  { key: 'spk_vs_spm_status', label: 'SPK vs SPM' },
-  { key: 'material_stock_status', label: 'Status Stok Material' },
-  { key: 'material_stock_shortage_count', label: 'Material Kurang', type: 'number' },
+  { key: 'tanggal', label: 'Tgl SPK', type: 'date' },
+  { key: 'no_gp', label: 'No GP', permissionKey: 'production_results' },
+  { key: 'tgl_gp', label: 'Tgl GP', type: 'date', permissionKey: 'tgl_selesai' },
+  { key: 'product_code', label: 'Code Product (Barang Jadi)', permissionKey: 'no_barang' },
+  { key: 'no_barang', label: 'No Barang Jadi' },
+  { key: 'nama_barang', label: 'Deskripsi Barang Jadi' },
+  { key: 'qty_spk', label: 'Qty SPK (Barang Jadi)', type: 'number' },
+  { key: 'qty_hasil_produksi', label: 'Qty GP', type: 'number' },
+  { key: 'material_name', label: 'Nama Material', permissionKey: 'materials' },
+  { key: 'formula_qty_for_spk_qty', label: 'Qty Material Formula * Qty SPK', type: 'number', permissionKey: 'materials' },
+  { key: 'spk_qty', label: 'Qty Material SPK', type: 'number', permissionKey: 'materials' },
+  { key: 'spm_qty', label: 'Qty Material SPM', type: 'number', permissionKey: 'materials' },
+  { key: 'unit', label: 'UOM Material', permissionKey: 'materials' },
+  { key: 'formula_cost_for_spk_qty', label: 'Biaya Formula * Qty SPK', type: 'number', permissionKey: 'formula_material_cost' },
+  { key: 'spk_cost', label: 'Biaya SPK', type: 'number', permissionKey: 'spk_material_cost' },
 ]
 
 const EXPORT_PARENT_COLS = [
@@ -369,6 +352,7 @@ export default function MonitoringFormula() {
   const buildParentExportFields = row => ({
     no_spk: row.no_spk,
     tanggal: row.tanggal,
+    product_code: row.product_code,
     no_hasil_produksi: productionResultNos(row),
     tgl_selesai: row.tgl_selesai,
     qty_hasil_produksi: row.qty_hasil_produksi,
@@ -424,6 +408,7 @@ export default function MonitoringFormula() {
     'hpp_total_actual', 'hpp_per_unit', 'hpp_per_unit_spk',
     'total_cost_diff', 'material_cost_diff', 'production_cost_diff',
     'formula_cost', 'formula_cost_for_spk_qty', 'spk_cost',
+    'biaya_formula_spk', 'biaya_spk',
     'formula_unit_cost', 'spk_unit_cost', 'total_wip', 'total_wip_inv', 'selisih',
   ])
 
@@ -465,10 +450,12 @@ export default function MonitoringFormula() {
 
   const buildReportHtml = rows => {
     const mainColumns = filterExportColumnsByPermission('monitoring_formula', MONITORING_FORMULA_EXPORT_COLS, user)
-    const mainRows = rows.map(row => ({
-      ...row,
-      no_hasil_produksi: productionResultNos(row),
-    }))
+    const mainRows = rows.flatMap(row => (row.materials || []).map(material => ({
+      ...buildParentExportFields(row),
+      ...material,
+      no_gp: productionResultNos(row),
+      tgl_gp: row.tgl_selesai,
+    })))
 
     return `
       <style>
