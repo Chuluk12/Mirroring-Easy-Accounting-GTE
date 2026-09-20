@@ -8,7 +8,7 @@ import {
 } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import api, { getApiErrorMessage } from '../../api/client'
-import { downloadHtmlXLS } from '../../utils/exportXls'
+import { downloadWorkbookXLS } from '../../utils/exportXls'
 import { withTableSorters } from '../../utils/tableSorters'
 import { useAuth } from '../../context/AuthContext'
 import { filterColumnsByPermission, filterExportColumnsByPermission } from '../../utils/columnPermissions'
@@ -44,8 +44,8 @@ const MONITORING_FORMULA_EXPORT_COLS = [
   { key: 'spk_qty', label: 'Qty Material SPK', type: 'number', permissionKey: 'materials' },
   { key: 'spm_qty', label: 'Qty Material SPM', type: 'number', permissionKey: 'materials' },
   { key: 'unit', label: 'UOM Material', permissionKey: 'materials' },
-  { key: 'formula_cost_for_spk_qty', label: 'Biaya Formula * Qty SPK', type: 'number', permissionKey: 'formula_material_cost' },
-  { key: 'spk_cost', label: 'Biaya SPK', type: 'number', permissionKey: 'spk_material_cost' },
+  { key: 'formula_cost_for_spk_qty', label: 'Biaya Formula * Qty SPK', type: 'accounting', permissionKey: 'formula_material_cost' },
+  { key: 'spk_cost', label: 'Biaya SPK', type: 'accounting', permissionKey: 'spk_material_cost' },
 ]
 
 const EXPORT_PARENT_COLS = [
@@ -448,14 +448,16 @@ export default function MonitoringFormula() {
     return `<table><thead><tr>${header}</tr></thead><tbody>${body}</tbody></table>`
   }
 
-  const buildReportHtml = rows => {
-    const mainColumns = filterExportColumnsByPermission('monitoring_formula', MONITORING_FORMULA_EXPORT_COLS, user)
-    const mainRows = rows.flatMap(row => (row.materials || []).map(material => ({
+  const buildMonitoringExportRows = rows => rows.flatMap(row => (row.materials || []).map(material => ({
       ...buildParentExportFields(row),
       ...material,
       no_gp: productionResultNos(row),
       tgl_gp: row.tgl_selesai,
     })))
+
+  const buildReportHtml = rows => {
+    const mainColumns = filterExportColumnsByPermission('monitoring_formula', MONITORING_FORMULA_EXPORT_COLS, user)
+    const mainRows = buildMonitoringExportRows(rows)
 
     return `
       <style>
@@ -497,7 +499,13 @@ export default function MonitoringFormula() {
         return
       }
 
-      downloadHtmlXLS(buildReportHtml(exportRows), 'MonitoringFormula', 'Monitoring Formula')
+      const exportColumns = filterExportColumnsByPermission('monitoring_formula', MONITORING_FORMULA_EXPORT_COLS, user)
+      const materialRows = buildMonitoringExportRows(exportRows)
+      downloadWorkbookXLS([{
+        name: 'Monitoring Formula',
+        columns: exportColumns,
+        rows: materialRows,
+      }], 'MonitoringFormula')
 
       try {
         await api.post('/api/audit/event', {
@@ -516,7 +524,7 @@ export default function MonitoringFormula() {
         // Audit failure should not block the downloaded export.
       }
       message.success({
-        content: `${exportRows.length} baris utama yang sedang tampil berhasil diekspor`,
+        content: `${materialRows.length} baris material berhasil diekspor`,
         key: 'export',
       })
     } catch (error) {
