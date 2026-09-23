@@ -388,7 +388,8 @@ MODULE_COLUMNS = {
         "spk_material_cost", "spk_production_cost", "spk_total_cost",
         "hpp_total_actual", "hpp_per_unit", "hpp_per_unit_spk", "hpp_status",
         "material_cost_diff", "production_cost_diff", "total_cost_diff",
-        "no_pesanan", "no_po", "wip_reconciliation",
+        "no_pesanan", "no_po", "sales_unit_price", "sales_total", "sales_price_source",
+        "wip_reconciliation",
     ],
     "spm": [
         "no_pengeluaran", "tgl_pengeluaran", "no_pk", "tgl_pk", "deskripsi",
@@ -491,6 +492,8 @@ MODULE_REQUIRED_RESPONSE_KEYS = {
     "monitoring_formula": [
         "wodet_id", "no_spk", "no_barang", "product_code", "materials", "production_details",
         "tgl_selesai", "qty_hasil_produksi", "production_progress", "production_results",
+        "tgl_qc", "status_qc", "progress_qc",
+        "no_faktur", "tgl_faktur",
         "qty_berhenti_produksi",
         "total_mat_plan", "total_mat_keluar", "material_progress", "production_status",
         "hpp_total_actual", "hpp_per_unit", "hpp_per_unit_spk", "hpp_status",
@@ -9029,6 +9032,30 @@ def _material_status(formula_qty, spk_qty, spm_qty):
     return formula_spk, spk_spm
 
 
+def _source_label(*sources):
+    active = [label for label, present in sources if present]
+    if not active:
+        return "-"
+    if len(active) == 1:
+        return f"{active[0]} Saja"
+    return " & ".join(active)
+
+
+def _comparison_status(formula_qty, spk_qty, spm_qty=None):
+    has_formula = formula_qty is not None
+    has_spk = spk_qty is not None
+    has_spm = spm_qty is not None
+    if has_formula and has_spk:
+        return "Sesuai" if _qty_match(formula_qty, spk_qty) else "Qty Berbeda"
+    if has_formula:
+        return "Tidak Dipakai di SPK"
+    if has_spk:
+        return "Tambahan di SPK"
+    if has_spm:
+        return "Tambahan di SPM"
+    return "-"
+
+
 def _formula_spk_status_from_materials(materials):
     statuses = [
         item.get("formula_spk_status")
@@ -9236,6 +9263,7 @@ def _fetch_material_maps_batch(cur, work_rows):
             "formula_map": {},
             "spk_map": {},
             "spm_map": {},
+            "spm_documents_by_material": {},
             "stock_map": {},
             "formula_production_map": {},
             "spk_production_map": {},
@@ -9595,15 +9623,66 @@ def _fetch_material_maps_batch(cur, work_rows):
 
         in_clause = _build_in_clause(wodet_ids)
         cur.execute(f"""
-            SELECT target_wodet_id, item_no, SUM(qty), MAX(unit), MAX(item_name)
+            SELECT DISTINCT target_wodet_id, item_no, release_no, release_date
+            FROM (
+                SELECT md.WODETID AS target_wodet_id,
+                       md.ITEMNO AS item_no,
+                       m.RELEASENO AS release_no,
+                       m.RELEASEDATE AS release_date
+                FROM MATRLSDET md
+                JOIN MATRLS m ON m.ID = md.MATRLSID
+                WHERE md.WODETID IN ({in_clause})
+
+                UNION ALL
+
+                SELECT wm.WODETID AS target_wodet_id,
+                       md.ITEMNO AS item_no,
+                       m.RELEASENO AS release_no,
+                       m.RELEASEDATE AS release_date
+                FROM MATRLSDET md
+                JOIN MATRLS m ON m.ID = md.MATRLSID
+                JOIN WODETMAT wm ON wm.ID = md.WODETID
+                WHERE wm.WODETID IN ({in_clause})
+            ) x
+            ORDER BY target_wodet_id, item_no, release_date, release_no
+        """, wodet_ids + wodet_ids)
+        for wodet_id, item_no, release_no, release_date in cur.fetchall():
+            target_id = int(wodet_id or 0)
+            material_no = str(item_no or "").strip()
+            if target_id not in result or not material_no:
+                continue
+            documents = result[target_id]["spm_documents_by_material"].setdefault(material_no, [])
+            document = {
+                "no_spm": str(release_no or "").strip(),
+                "tgl_spm": str(release_date) if release_date else "",
+            }
+            if document not in documents:
+                documents.append(document)
+
+        has_spm_itemhist_cost = (
+            _table_has_columns(cur, "MATRLSDET", ("ITEMHISTID",))
+            and _table_has_columns(cur, "ITEMHIST", ("ITEMHISTID", "COST"))
+        )
+        has_spm_detail_cost = _table_has_columns(cur, "MATRLSDET", ("COST",))
+        spm_cost_join = "LEFT JOIN ITEMHIST ih ON ih.ITEMHISTID = md.ITEMHISTID" if has_spm_itemhist_cost else ""
+        if has_spm_itemhist_cost:
+            spm_cost_expr = "ABS(COALESCE(ih.COST, 0))"
+        elif has_spm_detail_cost:
+            spm_cost_expr = "ABS(COALESCE(md.COST, 0))"
+        else:
+            spm_cost_expr = "0"
+        cur.execute(f"""
+            SELECT target_wodet_id, item_no, SUM(qty), MAX(unit), MAX(item_name), SUM(actual_cost)
             FROM (
                 SELECT md.WODETID AS target_wodet_id,
                        md.ITEMNO AS item_no,
                        md.QUANTITY AS qty,
                        md.UNIT AS unit,
-                       i.ITEMDESCRIPTION AS item_name
+                       i.ITEMDESCRIPTION AS item_name,
+                       {spm_cost_expr} AS actual_cost
                 FROM MATRLSDET md
                 LEFT JOIN ITEM i ON i.ITEMNO = md.ITEMNO
+                {spm_cost_join}
                 WHERE md.WODETID IN ({in_clause})
 
                 UNION ALL
@@ -9612,16 +9691,18 @@ def _fetch_material_maps_batch(cur, work_rows):
                        md.ITEMNO AS item_no,
                        md.QUANTITY AS qty,
                        md.UNIT AS unit,
-                       i.ITEMDESCRIPTION AS item_name
+                       i.ITEMDESCRIPTION AS item_name,
+                       {spm_cost_expr} AS actual_cost
                 FROM MATRLSDET md
                 JOIN WODETMAT wm ON wm.ID = md.WODETID
                 LEFT JOIN ITEM i ON i.ITEMNO = md.ITEMNO
+                {spm_cost_join}
                 WHERE wm.WODETID IN ({in_clause})
             ) x
             GROUP BY target_wodet_id, item_no
             ORDER BY target_wodet_id, item_no
         """, wodet_ids + wodet_ids)
-        for wodet_id, item_no, qty, unit, name in cur.fetchall():
+        for wodet_id, item_no, qty, unit, name, actual_cost in cur.fetchall():
             key = str(item_no or "").strip()
             target_id = int(wodet_id or 0)
             if target_id not in result or not key:
@@ -9630,6 +9711,7 @@ def _fetch_material_maps_batch(cur, work_rows):
                 "qty": float(qty or 0),
                 "unit": str(unit or "").strip(),
                 "name": str(name or "").strip(),
+                "cost": float(actual_cost or 0),
             }
 
     material_nos = sorted({
@@ -9966,7 +10048,8 @@ def api_monitoring_formula():
         qty_only = request.args.get("qty_only", "").lower() in ("1", "true", "yes")
         include_wip = request.args.get("include_wip", "").lower() in ("1", "true", "yes")
         skip_count = request.args.get("skip_count", "").lower() in ("1", "true", "yes")
-        max_limit = 500 if no_spk_filter else (50 if skip_count else 10)
+        bulk_export = request.args.get("bulk_export", "").lower() in ("1", "true", "yes")
+        max_limit = 500 if no_spk_filter else (250 if bulk_export else (50 if skip_count else 10))
         limit = max(1, min(requested_limit, max_limit)) if not search else max(1, requested_limit)
         query_limit = limit + 1 if skip_count else limit
         sort_fields = {
@@ -10055,7 +10138,19 @@ def api_monitoring_formula():
                     so.PONO,
                     det.STATUS AS WODET_STATUS,
                     {wodet_closed_expr} AS IS_WORK_ORDER_CLOSED,
-                    det.JOBDESCRIPTION
+                    det.JOBDESCRIPTION,
+                    det.SOID AS SO_ID,
+                    (SELECT FIRST 1 sd.UNITPRICE
+                     FROM SODET sd
+                     WHERE sd.SOID = det.SOID AND sd.ITEMNO = det.ITEMNO
+                     ORDER BY sd.SEQ) AS SALES_UNIT_PRICE,
+                    (SELECT FIRST 1 sd.DISCPC
+                     FROM SODET sd
+                     WHERE sd.SOID = det.SOID AND sd.ITEMNO = det.ITEMNO
+                     ORDER BY sd.SEQ) AS SALES_DISC_PCT,
+                    det.ITEMRESERVED8 AS TGL_QC,
+                    det.ITEMRESERVED9 AS STATUS_QC,
+                    det.ITEMRESERVED10 AS PROGRESS_QC
                 FROM WO w
                 JOIN WODET det ON det.WOID = w.ID
                 LEFT JOIN ITEM i ON i.ITEMNO = det.ITEMNO
@@ -10117,7 +10212,13 @@ def api_monitoring_formula():
                 ,p.WODET_STATUS,
                 p.IS_WORK_ORDER_CLOSED,
                 p.JOBDESCRIPTION,
-                p.PRODUCT_CODE
+                p.PRODUCT_CODE,
+                p.SALES_UNIT_PRICE,
+                p.SALES_DISC_PCT,
+                p.TGL_QC,
+                p.STATUS_QC,
+                p.PROGRESS_QC,
+                p.SO_ID
             FROM page_rows p
             LEFT JOIN result_agg ra           ON ra.WODETID  = p.WODET_ID
             LEFT JOIN mat_agg ma              ON ma.WODETID  = p.WODET_ID
@@ -10135,6 +10236,8 @@ def api_monitoring_formula():
             total_keluar = float(row[13] or 0)
             wodet_status = int(row[14] or 0)
             is_work_order_closed = bool(int(row[15] or 0))
+            sales_unit_price = float(row[18]) if row[18] is not None else None
+            sales_disc_pct = float(row[19] or 0)
             total_processed = max(total_qtytaken, total_keluar)
             material_progress = round(min((total_processed / total_mat_plan) * 100, 100.0), 1) if total_mat_plan > 0 else 0.0
             is_partial_closed_by_progress = (
@@ -10178,6 +10281,16 @@ def api_monitoring_formula():
                 "is_work_order_closed": is_work_order_closed,
                 "keterangan": str(row[16] or "").strip(),
                 "product_code": str(row[17] or "").strip(),
+                "sales_unit_price": sales_unit_price,
+                "sales_total": (
+                    sales_unit_price * qty_spk * (1 - sales_disc_pct / 100)
+                    if sales_unit_price is not None else None
+                ),
+                "sales_price_source": f"Sales Order {str(row[7] or '').strip()}" if row[7] else "Tidak Ada SO",
+                "tgl_qc": str(row[20] or "").strip(),
+                "status_qc": str(row[21] or "").strip(),
+                "progress_qc": str(row[22] or "").strip(),
+                "so_id": int(row[23] or 0),
                 "qty_berhenti_produksi": max(qty_spk - total_qty_hasil, 0) if is_work_order_closed else 0.0,
             })
 
@@ -10188,6 +10301,34 @@ def api_monitoring_formula():
         if skip_count:
             work_rows = work_rows[:limit]
             total_rows = offset + len(work_rows) + (1 if has_more else 0)
+
+        invoice_documents_map = {}
+        so_ids = sorted({row["so_id"] for row in work_rows if row.get("so_id")})
+        if so_ids:
+            cur.execute(f"""
+                SELECT DISTINCT det.SOID, det.ITEMNO, inv.INVOICENO, inv.INVOICEDATE
+                FROM ARINV do_doc
+                JOIN ARINVDET det ON det.ARINVOICEID = do_doc.ARINVOICEID
+                JOIN ARINV inv
+                  ON inv.CUSTOMERID = do_doc.CUSTOMERID
+                 AND inv.PURCHASEORDERNO = do_doc.PURCHASEORDERNO
+                WHERE det.SOID IN ({_build_in_clause(so_ids)})
+                  AND do_doc.DELIVERYORDER = 1
+                  AND do_doc.INVOICETYPE = 1
+                  AND inv.GETFROMDO = 1
+                  AND inv.INVOICETYPE = 1
+                  AND (inv.ISDP IS NULL OR inv.ISDP = 0)
+                ORDER BY det.SOID, det.ITEMNO, inv.INVOICEDATE, inv.INVOICENO
+            """, so_ids)
+            for so_id, item_no, invoice_no, invoice_date in cur.fetchall():
+                key = (int(so_id or 0), str(item_no or "").strip())
+                document = {
+                    "no_faktur": str(invoice_no or "").strip(),
+                    "tgl_faktur": str(invoice_date)[:10] if invoice_date else "",
+                }
+                documents = invoice_documents_map.setdefault(key, [])
+                if document not in documents:
+                    documents.append(document)
 
         production_results_map = {row["wodet_id"]: [] for row in work_rows}
         wodet_ids = [row["wodet_id"] for row in work_rows if row["wodet_id"]]
@@ -10270,6 +10411,7 @@ def api_monitoring_formula():
                         stock_status = "Aman"
                 _, spk_spm_status = _material_status(formula_qty, spk_qty, spm_qty)
                 info = formula or spk or spm or {}
+                spm_documents = maps.get("spm_documents_by_material", {}).get(material_no, [])
                 formula_cost_for_spk_qty = (
                     float(formula.get("cost") or 0) * (float(row["qty_spk"] or 0) / float(maps.get("qty_build") or 1))
                 ) if formula else None
@@ -10281,6 +10423,18 @@ def api_monitoring_formula():
                 materials.append({
                     "material_no": material_no,
                     "material_name": info.get("name", ""),
+                    "no_spm": ", ".join(dict.fromkeys(
+                        document.get("no_spm", "") for document in spm_documents if document.get("no_spm")
+                    )),
+                    "tgl_spm": ", ".join(dict.fromkeys(
+                        document.get("tgl_spm", "")[:10] for document in spm_documents if document.get("tgl_spm")
+                    )),
+                    "material_source": _source_label(
+                        ("Formula", formula is not None),
+                        ("SPK", spk is not None),
+                        ("SPM", spm is not None),
+                    ),
+                    "comparison_status": _comparison_status(formula_qty_for_spk_qty, spk_qty, spm_qty),
                     "formula_qty": formula_qty,
                     "formula_qty_for_spk_qty": formula_qty_for_spk_qty,
                     "spk_qty": spk_qty,
@@ -10288,6 +10442,7 @@ def api_monitoring_formula():
                     "spk_qty_changed_at": qty_snapshot.get("changed_at"),
                     "spk_qty_history": qty_snapshot.get("history", []),
                     "spm_qty": spm_qty,
+                    "spm_cost": float(spm.get("cost") or 0) if spm else None,
                     "formula_cost": float(formula.get("cost") or 0) if formula else None,
                     "formula_cost_for_spk_qty": formula_cost_for_spk_qty,
                     "formula_cost_estimated": bool(formula.get("cost_estimated")) if formula else False,
@@ -10319,6 +10474,14 @@ def api_monitoring_formula():
                 spk_prod_cost = float(spk_prod.get("cost") or 0) if spk_prod else None
                 production_details.append({
                     "cost_no": cost_no,
+                    "cost_source": _source_label(
+                        ("Formula", formula_prod is not None),
+                        ("SPK", spk_prod is not None),
+                    ),
+                    "comparison_status": _comparison_status(
+                        formula_prod_qty_for_spk_qty,
+                        spk_prod.get("qty") if spk_prod else None,
+                    ),
                     "description": info.get("description", ""),
                     "category": info.get("category", ""),
                     "formula_qty": formula_prod.get("qty") if formula_prod else None,
@@ -10376,6 +10539,22 @@ def api_monitoring_formula():
                 "uom": row["uom"],
                 "no_pesanan": row["no_pesanan"],
                 "no_po": row["no_po"],
+                "sales_unit_price": row["sales_unit_price"],
+                "sales_total": row["sales_total"],
+                "sales_price_source": row["sales_price_source"],
+                "no_faktur": ", ".join(dict.fromkeys(
+                    document["no_faktur"]
+                    for document in invoice_documents_map.get((row["so_id"], row["item_no"]), [])
+                    if document["no_faktur"]
+                )),
+                "tgl_faktur": ", ".join(dict.fromkeys(
+                    document["tgl_faktur"]
+                    for document in invoice_documents_map.get((row["so_id"], row["item_no"]), [])
+                    if document["tgl_faktur"]
+                )),
+                "tgl_qc": row["tgl_qc"],
+                "status_qc": row["status_qc"],
+                "progress_qc": row["progress_qc"],
                 "tgl_selesai": row["tgl_selesai"],
                 "qty_hasil_produksi": row["qty_hasil_produksi"],
                 "qty_berhenti_produksi": row["qty_berhenti_produksi"],

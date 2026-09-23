@@ -32,6 +32,11 @@ const STATUS_OPTIONS = [
 const MONITORING_FORMULA_EXPORT_COLS = [
   { key: 'no_spk', label: 'No SPK' },
   { key: 'tanggal', label: 'Tgl SPK', type: 'date' },
+  { key: 'no_spm', label: 'No SPM', permissionKey: 'materials' },
+  { key: 'tgl_spm', label: 'Tgl SPM', permissionKey: 'materials' },
+  { key: 'tgl_qc', label: 'Tgl QC' },
+  { key: 'status_qc', label: 'Status QC' },
+  { key: 'progress_qc', label: 'Progress QC' },
   { key: 'no_gp', label: 'No GP', permissionKey: 'production_results' },
   { key: 'tgl_gp', label: 'Tgl GP', type: 'date', permissionKey: 'tgl_selesai' },
   { key: 'product_code', label: 'Code Product (Barang Jadi)', permissionKey: 'no_barang' },
@@ -39,13 +44,61 @@ const MONITORING_FORMULA_EXPORT_COLS = [
   { key: 'nama_barang', label: 'Deskripsi Barang Jadi' },
   { key: 'qty_spk', label: 'Qty SPK (Barang Jadi)', type: 'number' },
   { key: 'qty_hasil_produksi', label: 'Qty GP', type: 'number' },
+  { key: 'uom', label: 'UOM Barang Jadi' },
+  { key: 'material_no', label: 'No Material', permissionKey: 'materials' },
   { key: 'material_name', label: 'Nama Material', permissionKey: 'materials' },
+  { key: 'material_source', label: 'Sumber Material', permissionKey: 'materials' },
+  { key: 'comparison_status', label: 'Status Perbandingan', permissionKey: 'materials' },
   { key: 'formula_qty_for_spk_qty', label: 'Qty Material Formula * Qty SPK', type: 'number', permissionKey: 'materials' },
   { key: 'spk_qty', label: 'Qty Material SPK', type: 'number', permissionKey: 'materials' },
   { key: 'spm_qty', label: 'Qty Material SPM', type: 'number', permissionKey: 'materials' },
   { key: 'unit', label: 'UOM Material', permissionKey: 'materials' },
   { key: 'formula_cost_for_spk_qty', label: 'Biaya Formula * Qty SPK', type: 'accounting', permissionKey: 'formula_material_cost' },
   { key: 'spk_cost', label: 'Biaya SPK', type: 'accounting', permissionKey: 'spk_material_cost' },
+  { key: 'spm_cost', label: 'Biaya SPM (Pengeluaran Material)', type: 'accounting', permissionKey: 'materials' },
+  { key: 'cost_description', label: 'Deskripsi Biaya', permissionKey: 'materials' },
+]
+
+const PRODUCTION_COST_EXPORT_COLS = [
+  { key: 'no_spk', label: 'No SPK' },
+  { key: 'tanggal', label: 'Tgl SPK', type: 'date' },
+  { key: 'no_gp', label: 'No GP', permissionKey: 'production_results' },
+  { key: 'tgl_gp', label: 'Tgl GP', type: 'date', permissionKey: 'tgl_selesai' },
+  { key: 'product_code', label: 'Code Product (Barang Jadi)', permissionKey: 'no_barang' },
+  { key: 'no_barang', label: 'No Barang Jadi' },
+  { key: 'nama_barang', label: 'Deskripsi Barang Jadi' },
+  { key: 'cost_no', label: 'No Biaya', permissionKey: 'production_details' },
+  { key: 'description', label: 'Deskripsi Biaya', permissionKey: 'production_details' },
+  { key: 'cost_source', label: 'Sumber Biaya', permissionKey: 'production_details' },
+  { key: 'comparison_status', label: 'Status Perbandingan', permissionKey: 'production_details' },
+  { key: 'formula_qty_for_spk_qty', label: 'Jam Formula * Qty SPK', type: 'number', permissionKey: 'production_details' },
+  { key: 'spk_qty', label: 'Jam SPK', type: 'number', permissionKey: 'production_details' },
+  { key: 'formula_unit_cost', label: 'Biaya/Jam Formula', type: 'accounting', permissionKey: 'formula_production_cost' },
+  { key: 'spk_unit_cost', label: 'Biaya/Jam SPK', type: 'accounting', permissionKey: 'spk_production_cost' },
+  { key: 'formula_cost_for_spk_qty', label: 'Jumlah Biaya Formula', type: 'accounting', permissionKey: 'formula_production_cost' },
+  { key: 'spk_cost', label: 'Jumlah Biaya SPK', type: 'accounting', permissionKey: 'spk_production_cost' },
+]
+
+const SALES_PRICE_EXPORT_COLS = [
+  { key: 'no_spk', label: 'No SPK' },
+  { key: 'tanggal', label: 'Tgl SPK', type: 'date' },
+  { key: 'no_gp', label: 'No GP', permissionKey: 'production_results' },
+  { key: 'tgl_gp', label: 'Tgl GP', type: 'date', permissionKey: 'tgl_selesai' },
+  { key: 'product_code', label: 'Code Product (Barang Jadi)', permissionKey: 'no_barang' },
+  { key: 'no_barang', label: 'No Barang Jadi' },
+  { key: 'nama_barang', label: 'Deskripsi Barang Jadi' },
+  { key: 'qty_spk', label: 'Qty SPK (Barang Jadi)', type: 'number' },
+  { key: 'qty_hasil_produksi', label: 'Qty GP', type: 'number' },
+  { key: 'uom', label: 'UOM Barang Jadi' },
+  { key: 'no_pesanan', label: 'No SO' },
+  { key: 'no_faktur', label: 'No Faktur' },
+  { key: 'tgl_faktur', label: 'Tgl Faktur' },
+  { key: 'sales_unit_price', label: 'Harga Jual/Unit', type: 'accounting' },
+  { key: 'sales_total', label: 'Total Harga Jual', type: 'accounting' },
+  { key: 'hpp_per_unit', label: 'HPP/Unit Berdasarkan Qty GP', type: 'accounting' },
+  { key: 'hpp_per_unit_spk', label: 'HPP/Unit Berdasarkan Qty SPK', type: 'accounting' },
+  { key: 'spk_total_cost', label: 'Total HPP SPK', type: 'accounting' },
+  { key: 'sales_price_source', label: 'Sumber Harga Jual' },
 ]
 
 const EXPORT_PARENT_COLS = [
@@ -130,6 +183,60 @@ const statusColor = status => {
 const formatQty = value => {
   if (value === null || value === undefined) return '-'
   return Number(value || 0).toLocaleString('id-ID', { maximumFractionDigits: 4 })
+}
+
+const hasExportValue = value => value !== null && value !== undefined
+
+const exportSourceLabel = sources => {
+  const active = sources.filter(([, present]) => present).map(([label]) => label)
+  if (!active.length) return '-'
+  return active.length === 1 ? `${active[0]} Saja` : active.join(' & ')
+}
+
+const exportComparisonStatus = (formulaQty, spkQty, spmQty) => {
+  const hasFormula = hasExportValue(formulaQty)
+  const hasSpk = hasExportValue(spkQty)
+  const hasSpm = hasExportValue(spmQty)
+  if (hasFormula && hasSpk) {
+    const formula = Number(formulaQty || 0)
+    const spk = Number(spkQty || 0)
+    const tolerance = Math.max(1, Math.abs(formula), Math.abs(spk)) * 0.000001
+    return Math.abs(formula - spk) <= tolerance ? 'Sesuai' : 'Qty Berbeda'
+  }
+  if (hasFormula) return 'Tidak Dipakai di SPK'
+  if (hasSpk) return 'Tambahan di SPK'
+  if (hasSpm) return 'Tambahan di SPM'
+  return '-'
+}
+
+const withExportItemLabels = rows => {
+  const groups = new Map()
+  rows.forEach((row, position) => {
+    const key = JSON.stringify([
+      String(row.no_spk || '').trim(),
+      String(row.no_barang || '').trim(),
+      String(row.nama_barang || '').trim(),
+      Number(row.qty_spk || 0),
+    ])
+    if (!groups.has(key)) groups.set(key, [])
+    groups.get(key).push({ row, position })
+  })
+
+  const labelsByPosition = new Map()
+  groups.forEach(group => {
+    if (group.length < 2) return
+    group
+      .slice()
+      .sort((left, right) => Number(left.row.wodet_id || 0) - Number(right.row.wodet_id || 0) || left.position - right.position)
+      .forEach((entry, index) => {
+        labelsByPosition.set(entry.position, `${entry.row.no_barang}-${index + 1}`)
+      })
+  })
+
+  return rows.map((row, position) => ({
+    ...row,
+    export_no_barang: labelsByPosition.get(position) || row.no_barang,
+  }))
 }
 
 const formatCurrency = value => new Intl.NumberFormat('id-ID', {
@@ -352,14 +459,26 @@ export default function MonitoringFormula() {
   const buildParentExportFields = row => ({
     no_spk: row.no_spk,
     tanggal: row.tanggal,
+    tgl_qc: row.tgl_qc,
+    status_qc: row.status_qc,
+    progress_qc: row.progress_qc,
     product_code: row.product_code,
     no_hasil_produksi: productionResultNos(row),
     tgl_selesai: row.tgl_selesai,
     qty_hasil_produksi: row.qty_hasil_produksi,
-    no_barang: row.no_barang,
+    no_barang: row.export_no_barang || row.no_barang,
     nama_barang: row.nama_barang,
     qty_spk: row.qty_spk,
     uom: row.uom,
+    no_pesanan: row.no_pesanan,
+    no_faktur: row.no_faktur,
+    tgl_faktur: row.tgl_faktur,
+    sales_unit_price: row.sales_unit_price,
+    sales_total: row.sales_total,
+    hpp_per_unit: row.hpp_per_unit,
+    hpp_per_unit_spk: row.hpp_per_unit_spk,
+    spk_total_cost: row.spk_total_cost,
+    sales_price_source: row.sales_price_source,
     no_formula: row.no_formula,
   })
 
@@ -451,9 +570,42 @@ export default function MonitoringFormula() {
   const buildMonitoringExportRows = rows => rows.flatMap(row => (row.materials || []).map(material => ({
       ...buildParentExportFields(row),
       ...material,
+      material_source: material.material_source || exportSourceLabel([
+        ['Formula', hasExportValue(material.formula_qty_for_spk_qty)],
+        ['SPK', hasExportValue(material.spk_qty)],
+        ['SPM', hasExportValue(material.spm_qty)],
+      ]),
+      comparison_status: material.comparison_status || exportComparisonStatus(
+        material.formula_qty_for_spk_qty,
+        material.spk_qty,
+        material.spm_qty,
+      ),
       no_gp: productionResultNos(row),
       tgl_gp: row.tgl_selesai,
     })))
+
+  const buildProductionCostExportRows = rows => rows.flatMap(row => (
+    (row.production_details || []).map(detail => ({
+      ...buildParentExportFields(row),
+      ...detail,
+      cost_source: detail.cost_source || exportSourceLabel([
+        ['Formula', hasExportValue(detail.formula_qty_for_spk_qty)],
+        ['SPK', hasExportValue(detail.spk_qty)],
+      ]),
+      comparison_status: detail.comparison_status || exportComparisonStatus(
+        detail.formula_qty_for_spk_qty,
+        detail.spk_qty,
+      ),
+      no_gp: productionResultNos(row),
+      tgl_gp: row.tgl_selesai,
+    }))
+  ))
+
+  const buildSalesPriceExportRows = rows => rows.map(row => ({
+    ...buildParentExportFields(row),
+    no_gp: productionResultNos(row),
+    tgl_gp: row.tgl_selesai,
+  }))
 
   const buildReportHtml = rows => {
     const mainColumns = filterExportColumnsByPermission('monitoring_formula', MONITORING_FORMULA_EXPORT_COLS, user)
@@ -499,13 +651,30 @@ export default function MonitoringFormula() {
         return
       }
 
+      const labeledExportRows = withExportItemLabels(exportRows)
       const exportColumns = filterExportColumnsByPermission('monitoring_formula', MONITORING_FORMULA_EXPORT_COLS, user)
-      const materialRows = buildMonitoringExportRows(exportRows)
-      downloadWorkbookXLS([{
-        name: 'Monitoring Formula',
-        columns: exportColumns,
-        rows: materialRows,
-      }], 'MonitoringFormula')
+      const productionColumns = filterExportColumnsByPermission('monitoring_formula', PRODUCTION_COST_EXPORT_COLS, user)
+      const salesColumns = filterExportColumnsByPermission('monitoring_formula', SALES_PRICE_EXPORT_COLS, user)
+      const materialRows = buildMonitoringExportRows(labeledExportRows)
+      const productionRows = buildProductionCostExportRows(labeledExportRows)
+      const salesRows = buildSalesPriceExportRows(labeledExportRows)
+      downloadWorkbookXLS([
+        {
+          name: 'Material',
+          columns: exportColumns,
+          rows: materialRows,
+        },
+        {
+          name: 'Biaya Produksi',
+          columns: productionColumns,
+          rows: productionRows,
+        },
+        {
+          name: 'Harga Jual',
+          columns: salesColumns,
+          rows: salesRows,
+        },
+      ], 'MonitoringFormula')
 
       try {
         await api.post('/api/audit/event', {
@@ -524,7 +693,7 @@ export default function MonitoringFormula() {
         // Audit failure should not block the downloaded export.
       }
       message.success({
-        content: `${materialRows.length} baris material berhasil diekspor`,
+        content: `${materialRows.length} material, ${productionRows.length} biaya produksi, dan ${salesRows.length} harga jual berhasil diekspor`,
         key: 'export',
       })
     } catch (error) {
