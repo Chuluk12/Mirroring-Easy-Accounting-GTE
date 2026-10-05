@@ -381,7 +381,7 @@ MODULE_COLUMNS = {
     ],
     "monitoring_formula": [
         "wodet_id", "no_spk", "tanggal", "product_code", "no_barang", "nama_barang", "qty_spk",
-        "uom", "no_formula", "formula_material_count", "spk_material_count",
+        "uom", "spk_note", "no_job", "no_formula", "formula_material_count", "spk_material_count",
         "spm_material_count", "formula_vs_spk_status", "spk_vs_spm_status",
         "material_stock_status", "material_stock_shortage_count",
         "formula_material_cost", "formula_production_cost", "formula_total_cost",
@@ -491,6 +491,7 @@ MODULE_REQUIRED_RESPONSE_KEYS = {
     "fifo": ["no_barang"],
     "monitoring_formula": [
         "wodet_id", "no_spk", "no_barang", "product_code", "materials", "production_details",
+        "spk_note", "no_job",
         "tgl_selesai", "qty_hasil_produksi", "production_progress", "production_results",
         "tgl_qc", "status_qc", "progress_qc",
         "no_faktur", "tgl_faktur",
@@ -10150,7 +10151,9 @@ def api_monitoring_formula():
                      ORDER BY sd.SEQ) AS SALES_DISC_PCT,
                     det.ITEMRESERVED8 AS TGL_QC,
                     det.ITEMRESERVED9 AS STATUS_QC,
-                    det.ITEMRESERVED10 AS PROGRESS_QC
+                    det.ITEMRESERVED10 AS PROGRESS_QC,
+                    det.ITEMRESERVED1 AS SPK_NOTE,
+                    det.NOJOB AS NO_JOB
                 FROM WO w
                 JOIN WODET det ON det.WOID = w.ID
                 LEFT JOIN ITEM i ON i.ITEMNO = det.ITEMNO
@@ -10218,7 +10221,9 @@ def api_monitoring_formula():
                 p.TGL_QC,
                 p.STATUS_QC,
                 p.PROGRESS_QC,
-                p.SO_ID
+                p.SO_ID,
+                p.SPK_NOTE,
+                p.NO_JOB
             FROM page_rows p
             LEFT JOIN result_agg ra           ON ra.WODETID  = p.WODET_ID
             LEFT JOIN mat_agg ma              ON ma.WODETID  = p.WODET_ID
@@ -10291,6 +10296,8 @@ def api_monitoring_formula():
                 "status_qc": str(row[21] or "").strip(),
                 "progress_qc": str(row[22] or "").strip(),
                 "so_id": int(row[23] or 0),
+                "spk_note": str(row[24] or "").strip(),
+                "no_job": str(row[25] or "").strip(),
                 "qty_berhenti_produksi": max(qty_spk - total_qty_hasil, 0) if is_work_order_closed else 0.0,
             })
 
@@ -10536,6 +10543,8 @@ def api_monitoring_formula():
                 "nama_barang": row["item_name"],
                 "qty_spk": row["qty_spk"],
                 "keterangan": row["keterangan"],
+                "spk_note": row["spk_note"],
+                "no_job": row["no_job"],
                 "uom": row["uom"],
                 "no_pesanan": row["no_pesanan"],
                 "no_po": row["no_po"],

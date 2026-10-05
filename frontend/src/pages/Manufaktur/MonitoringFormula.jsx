@@ -38,10 +38,12 @@ const MONITORING_FORMULA_EXPORT_COLS = [
   { key: 'status_qc', label: 'Status QC' },
   { key: 'progress_qc', label: 'Progress QC' },
   { key: 'no_gp', label: 'No GP', permissionKey: 'production_results' },
+  { key: 'no_job', label: 'No. Job' },
   { key: 'tgl_gp', label: 'Tgl GP', type: 'date', permissionKey: 'tgl_selesai' },
   { key: 'product_code', label: 'Code Product (Barang Jadi)', permissionKey: 'no_barang' },
   { key: 'no_barang', label: 'No Barang Jadi' },
   { key: 'nama_barang', label: 'Deskripsi Barang Jadi' },
+  { key: 'spk_note', label: 'Note SPK' },
   { key: 'qty_spk', label: 'Qty SPK (Barang Jadi)', type: 'number' },
   { key: 'qty_hasil_produksi', label: 'Qty GP', type: 'number' },
   { key: 'uom', label: 'UOM Barang Jadi' },
@@ -63,6 +65,7 @@ const PRODUCTION_COST_EXPORT_COLS = [
   { key: 'no_spk', label: 'No SPK' },
   { key: 'tanggal', label: 'Tgl SPK', type: 'date' },
   { key: 'no_gp', label: 'No GP', permissionKey: 'production_results' },
+  { key: 'no_job', label: 'No. Job' },
   { key: 'tgl_gp', label: 'Tgl GP', type: 'date', permissionKey: 'tgl_selesai' },
   { key: 'product_code', label: 'Code Product (Barang Jadi)', permissionKey: 'no_barang' },
   { key: 'no_barang', label: 'No Barang Jadi' },
@@ -83,6 +86,7 @@ const SALES_PRICE_EXPORT_COLS = [
   { key: 'no_spk', label: 'No SPK' },
   { key: 'tanggal', label: 'Tgl SPK', type: 'date' },
   { key: 'no_gp', label: 'No GP', permissionKey: 'production_results' },
+  { key: 'no_job', label: 'No. Job' },
   { key: 'tgl_gp', label: 'Tgl GP', type: 'date', permissionKey: 'tgl_selesai' },
   { key: 'product_code', label: 'Code Product (Barang Jadi)', permissionKey: 'no_barang' },
   { key: 'no_barang', label: 'No Barang Jadi' },
@@ -207,36 +211,6 @@ const exportComparisonStatus = (formulaQty, spkQty, spmQty) => {
   if (hasSpk) return 'Tambahan di SPK'
   if (hasSpm) return 'Tambahan di SPM'
   return '-'
-}
-
-const withExportItemLabels = rows => {
-  const groups = new Map()
-  rows.forEach((row, position) => {
-    const key = JSON.stringify([
-      String(row.no_spk || '').trim(),
-      String(row.no_barang || '').trim(),
-      String(row.nama_barang || '').trim(),
-      Number(row.qty_spk || 0),
-    ])
-    if (!groups.has(key)) groups.set(key, [])
-    groups.get(key).push({ row, position })
-  })
-
-  const labelsByPosition = new Map()
-  groups.forEach(group => {
-    if (group.length < 2) return
-    group
-      .slice()
-      .sort((left, right) => Number(left.row.wodet_id || 0) - Number(right.row.wodet_id || 0) || left.position - right.position)
-      .forEach((entry, index) => {
-        labelsByPosition.set(entry.position, `${entry.row.no_barang}-${index + 1}`)
-      })
-  })
-
-  return rows.map((row, position) => ({
-    ...row,
-    export_no_barang: labelsByPosition.get(position) || row.no_barang,
-  }))
 }
 
 const formatCurrency = value => new Intl.NumberFormat('id-ID', {
@@ -462,12 +436,14 @@ export default function MonitoringFormula() {
     tgl_qc: row.tgl_qc,
     status_qc: row.status_qc,
     progress_qc: row.progress_qc,
+    no_job: row.no_job,
     product_code: row.product_code,
     no_hasil_produksi: productionResultNos(row),
     tgl_selesai: row.tgl_selesai,
     qty_hasil_produksi: row.qty_hasil_produksi,
-    no_barang: row.export_no_barang || row.no_barang,
+    no_barang: row.no_barang,
     nama_barang: row.nama_barang,
+    spk_note: row.spk_note,
     qty_spk: row.qty_spk,
     uom: row.uom,
     no_pesanan: row.no_pesanan,
@@ -641,6 +617,21 @@ export default function MonitoringFormula() {
     `
   }
 
+  const exportMonitoringRows = (exportRows, filename) => {
+    const exportColumns = filterExportColumnsByPermission('monitoring_formula', MONITORING_FORMULA_EXPORT_COLS, user)
+    const productionColumns = filterExportColumnsByPermission('monitoring_formula', PRODUCTION_COST_EXPORT_COLS, user)
+    const salesColumns = filterExportColumnsByPermission('monitoring_formula', SALES_PRICE_EXPORT_COLS, user)
+    const materialRows = buildMonitoringExportRows(exportRows)
+    const productionRows = buildProductionCostExportRows(exportRows)
+    const salesRows = buildSalesPriceExportRows(exportRows)
+    downloadWorkbookXLS([
+      { name: 'Material', columns: exportColumns, rows: materialRows },
+      { name: 'Biaya Produksi', columns: productionColumns, rows: productionRows },
+      { name: 'Harga Jual', columns: salesColumns, rows: salesRows },
+    ], filename)
+    return { materialRows, productionRows, salesRows }
+  }
+
   const handleExport = async () => {
     setExporting(true)
     message.loading({ content: 'Menyiapkan export monitoring formula...', key: 'export', duration: 0 })
@@ -651,30 +642,7 @@ export default function MonitoringFormula() {
         return
       }
 
-      const labeledExportRows = withExportItemLabels(exportRows)
-      const exportColumns = filterExportColumnsByPermission('monitoring_formula', MONITORING_FORMULA_EXPORT_COLS, user)
-      const productionColumns = filterExportColumnsByPermission('monitoring_formula', PRODUCTION_COST_EXPORT_COLS, user)
-      const salesColumns = filterExportColumnsByPermission('monitoring_formula', SALES_PRICE_EXPORT_COLS, user)
-      const materialRows = buildMonitoringExportRows(labeledExportRows)
-      const productionRows = buildProductionCostExportRows(labeledExportRows)
-      const salesRows = buildSalesPriceExportRows(labeledExportRows)
-      downloadWorkbookXLS([
-        {
-          name: 'Material',
-          columns: exportColumns,
-          rows: materialRows,
-        },
-        {
-          name: 'Biaya Produksi',
-          columns: productionColumns,
-          rows: productionRows,
-        },
-        {
-          name: 'Harga Jual',
-          columns: salesColumns,
-          rows: salesRows,
-        },
-      ], 'MonitoringFormula')
+      const { materialRows, productionRows, salesRows } = exportMonitoringRows(exportRows, 'MonitoringFormula')
 
       try {
         await api.post('/api/audit/event', {
@@ -698,6 +666,67 @@ export default function MonitoringFormula() {
       })
     } catch (error) {
       message.error({ content: `Gagal export: ${error.message || 'error'}`, key: 'export' })
+    } finally {
+      setExporting(false)
+    }
+  }
+
+  const handleExportMonth = async () => {
+    setExporting(true)
+    message.loading({ content: 'Mengambil seluruh data Monitoring Formula bulan ini...', key: 'export', duration: 0 })
+    try {
+      const month = (dateRangeRef.current?.[0] || dayjs()).startOf('month')
+      const dateFrom = month.format('YYYY-MM-DD')
+      const dateTo = month.endOf('month').format('YYYY-MM-DD')
+      const pageSize = 250
+      const exportRows = []
+      let offset = 0
+      let hasMore = true
+
+      while (hasMore) {
+        const params = {
+          offset,
+          limit: pageSize,
+          bulk_export: 1,
+          skip_count: 1,
+          date_from: dateFrom,
+          date_to: dateTo,
+        }
+        if (searchRef.current) params.search = searchRef.current
+        if (statusRef.current) params.status = statusRef.current
+        if (productRef.current) params.product = productRef.current
+
+        const res = await api.get('/api/monitoring-formula', { params, timeout: 90000 })
+        const batch = res.data.data || []
+        exportRows.push(...batch)
+        hasMore = batch.length === pageSize
+        offset += batch.length
+        message.loading({ content: `Mengambil data bulan ${month.format('MMMM YYYY')}: ${exportRows.length} baris...`, key: 'export', duration: 0 })
+      }
+
+      if (!exportRows.length) {
+        message.warning({ content: `Tidak ada data pada ${month.format('MMMM YYYY')}`, key: 'export' })
+        return
+      }
+
+      const filename = `MonitoringFormula_${month.format('YYYY_MM')}`
+      const { materialRows, productionRows, salesRows } = exportMonitoringRows(exportRows, filename)
+      try {
+        await api.post('/api/audit/event', {
+          action: 'export',
+          module: 'monitoring_formula',
+          description: `Export Monitoring Formula ${month.format('MMMM YYYY')}`,
+          metadata: { filename, layout: 'monthly_full', rows: exportRows.length, date_from: dateFrom, date_to: dateTo },
+        })
+      } catch {
+        // Audit failure should not block the downloaded export.
+      }
+      message.success({
+        content: `${exportRows.length} SPK (${materialRows.length} material, ${productionRows.length} biaya produksi, ${salesRows.length} harga jual) berhasil diekspor`,
+        key: 'export',
+      })
+    } catch (error) {
+      message.error({ content: `Gagal export bulanan: ${getApiErrorMessage(error, error.message || 'error')}`, key: 'export' })
     } finally {
       setExporting(false)
     }
@@ -1661,6 +1690,14 @@ export default function MonitoringFormula() {
               style={{ background: '#217346', borderColor: '#217346' }}
             >
               Export XLS
+            </Button>
+            <Button
+              icon={<FileExcelOutlined />}
+              onClick={handleExportMonth}
+              loading={exporting}
+              title="Mengekspor semua data pada bulan dari tanggal awal yang dipilih, dengan filter aktif"
+            >
+              Export 1 Bulan
             </Button>
           </Space>
         }
