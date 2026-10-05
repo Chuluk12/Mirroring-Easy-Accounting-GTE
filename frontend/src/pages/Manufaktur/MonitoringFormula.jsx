@@ -1028,6 +1028,13 @@ export default function MonitoringFormula() {
       },
     },
     {
+      title: 'No-Job',
+      dataIndex: 'no_job',
+      key: 'no_job',
+      width: 150,
+      render: value => <Text code style={{ fontSize: 12 }}>{value || '-'}</Text>,
+    },
+    {
       title: 'No Barang',
       dataIndex: 'no_barang',
       key: 'no_barang',
