@@ -947,8 +947,8 @@ def _so_import_rows(resource, offset, limit):
                             * (1 - COALESCE(CAST(NULLIF(TRIM(det.DISCPC), '') AS DOUBLE PRECISION), 0) / 100)
                             * COALESCE(so.TAX1RATE, 0) / 100 ELSE 0 END),
                     CASE
-                      WHEN SUM(CASE WHEN {line_closed_expr} <> 0 THEN 1 ELSE 0 END) = COUNT(*) THEN 'Ditutup'
                       WHEN SUM(CASE WHEN COALESCE(det.QUANTITY, 0) > 0 AND COALESCE(det.QTYSHIPPED, 0) >= COALESCE(det.QUANTITY, 0) THEN 1 ELSE 0 END) = COUNT(*) THEN 'Diterima'
+                      WHEN SUM(CASE WHEN {line_closed_expr} <> 0 THEN 1 ELSE 0 END) = COUNT(*) THEN 'Ditutup'
                       WHEN SUM(CASE WHEN COALESCE(det.QTYSHIPPED, 0) > 0 THEN 1 ELSE 0 END) > 0 THEN 'Diproses'
                       ELSE 'Menunggu'
                     END,
