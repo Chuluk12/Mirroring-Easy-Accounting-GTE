@@ -330,7 +330,7 @@ MODULE_COLUMNS = {
         "jatuh_tempo", "deskripsi", "no_po", "status", "overdue",
     ],
     "penjualan_so": [
-        "no_so", "tgl_so", "tgl_estimasi", "no_pelanggan", "nama_pelanggan",
+        "no_so", "tgl_so", "tgl_estimasi", "under", "no_pelanggan", "nama_pelanggan",
         "no_po_customer", "nama_salesman", "no_barang", "deskripsi_barang", "qty",
         "qty_shipped", "sisa_kirim", "stok_tersedia", "uom", "unit_price", "disc_pct",
         "ppn_rate", "ppn_amount", "subtotal", "amount", "no_pengiriman",
@@ -6980,6 +6980,7 @@ def _build_so_rows(rows, delivery_map=None, spk_map=None):
             "no_so":            str(row[0]  or "").strip(),
             "tgl_so":           str(row[1])  if row[1]  else "",
             "tgl_estimasi":     str(row[2])  if row[2]  else "",
+            "under":            "GTE",
             "no_pelanggan":     str(row[3]  or "").strip(),
             "nama_pelanggan":   str(row[4]  or "").strip(),
             "no_po_customer":   str(row[5]  or "").strip(),

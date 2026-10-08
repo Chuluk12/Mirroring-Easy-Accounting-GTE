@@ -43,6 +43,8 @@ ALLOWED_PARAMS = {
     "standarisasi-harga": {"search", "status", "date_from", "date_to"},
     "fifo": {"search", "columns", "date_from", "date_to"},
     "pembelian": {"search", "date_from", "date_to"},
+    "penjualan-item-oriented-header": {"search", "date_from", "date_to"},
+    "penjualan-item-oriented-item": {"search", "no_so", "date_from", "date_to", "status"},
     "saved-reports": {"user"},
     "gl-accounts": {"accounttype", "parentaccount", "suspended"},
 }
@@ -825,8 +827,11 @@ def _success_response(resource, upstream, offset, limit):
             or ((request.args.get("date_from") or request.args.get("date_to")) and "date_from" not in ALLOWED_PARAMS[resource])
             or (request.args.get("search") and "search" not in ALLOWED_PARAMS[resource])
         )
-        total = None if upstream.get("total") is None else (
-            len(shaped_rows) if filtered_locally else int(upstream.get("total", len(original_rows)) or 0)
+        upstream_total = upstream.get("total")
+        if upstream_total is None and resource == "penjualan-item-oriented":
+            upstream_total = upstream.get("total_rows")
+        total = None if upstream_total is None else (
+            len(shaped_rows) if filtered_locally else int(upstream_total or 0)
         )
         extra = {
             key: value
@@ -852,7 +857,174 @@ def _success_response(resource, upstream, offset, limit):
             "total": total,
             "total_page": total_page,
             "has_more": bool(has_more) if has_more is not None else offset + len(rows) < total,
+            "date_getting_data": datetime.now().astimezone().isoformat(),
             **extra,
+        },
+    }, 200
+
+
+SO_HEADER_COLUMNS = (
+    "Tanggal SO", "Under", "Penjual", "No. Customer", "Nama Customer",
+    "No. SO", "No. PO", "Nilai SO", "Status", "Catatan",
+)
+SO_ITEM_COLUMNS = (
+    "Tanggal SO", "Under", "Penjual", "No. Customer", "Nama Customer",
+    "No. SO", "No. PO", "No. Barang", "Deskripsi Barang", "Kuantitas",
+    "Satuan", "Nilai Item", "Kategori Produk", "Jenis Produk",
+    "Tipe Pelanggan", "Status",
+)
+
+
+def _so_import_filters(resource, line_closed_expr="COALESCE(so.CLOSED, 0)"):
+    conditions = ["det.ITEMNO IS NOT NULL"]
+    params = []
+    search = str(request.args.get("search", "") or "").strip()
+    date_from = str(request.args.get("date_from", "") or "").strip()
+    date_to = str(request.args.get("date_to", "") or "").strip()
+    no_so = str(request.args.get("no_so", "") or "").strip()
+    if search:
+        conditions.append("""(
+            LOWER(so.SONO) CONTAINING LOWER(?)
+            OR LOWER(pd.PERSONNO) CONTAINING LOWER(?)
+            OR LOWER(pd.NAME) CONTAINING LOWER(?)
+            OR LOWER(so.PONO) CONTAINING LOWER(?)
+            OR LOWER(det.ITEMNO) CONTAINING LOWER(?)
+            OR LOWER(det.ITEMOVDESC) CONTAINING LOWER(?)
+        )""")
+        params.extend([search] * 6)
+    if date_from:
+        conditions.append("so.SODATE >= ?")
+        params.append(date_from)
+    if date_to:
+        conditions.append("so.SODATE <= ?")
+        params.append(date_to)
+    if resource.endswith("-item") and no_so:
+        conditions.append("UPPER(TRIM(so.SONO)) = UPPER(?)")
+        params.append(no_so)
+    if resource.endswith("-item") and request.args.get("status"):
+        status = request.args["status"]
+        if status == "waiting":
+            conditions.append(f"COALESCE(det.QTYSHIPPED, 0) <= 0 AND {line_closed_expr} = 0")
+        elif status == "process":
+            conditions.append(f"COALESCE(det.QTYSHIPPED, 0) > 0 AND COALESCE(det.QTYSHIPPED, 0) < COALESCE(det.QUANTITY, 0) AND {line_closed_expr} = 0")
+        elif status == "received":
+            conditions.append("COALESCE(det.QUANTITY, 0) > 0 AND COALESCE(det.QTYSHIPPED, 0) >= COALESCE(det.QUANTITY, 0)")
+        elif status == "closed":
+            conditions.append(f"{line_closed_expr} <> 0")
+    return " AND ".join(conditions), params
+
+
+def _so_import_rows(resource, offset, limit):
+    from server import _so_line_closed_expr, connect_easy_db
+
+    con = connect_easy_db()
+    try:
+        cur = con.cursor()
+        line_closed_expr = _so_line_closed_expr(cur)
+        where_sql, params = _so_import_filters(resource, line_closed_expr)
+        if resource.endswith("-header"):
+            total_sql = f"""
+                SELECT COUNT(*) FROM (
+                    SELECT so.SOID
+                    FROM SO so
+                    LEFT JOIN PERSONDATA pd ON pd.ID = so.CUSTOMERID
+                    LEFT JOIN SODET det ON det.SOID = so.SOID
+                    WHERE {where_sql}
+                    GROUP BY so.SOID
+                )
+            """
+            cur.execute(total_sql, params)
+            total = int((cur.fetchone() or [0])[0] or 0)
+            sql = f"""
+                SELECT FIRST ? SKIP ?
+                    so.SODATE,
+                    COALESCE(sm.FIRSTNAME || ' ' || sm.LASTNAME, ''),
+                    pd.PERSONNO, pd.NAME, so.SONO, so.PONO,
+                    SUM(COALESCE(det.QUANTITY, 0) * COALESCE(det.UNITPRICE, 0)
+                        * (1 - COALESCE(CAST(NULLIF(TRIM(det.DISCPC), '') AS DOUBLE PRECISION), 0) / 100)
+                        + CASE WHEN TRIM(COALESCE(det.TAXCODES, '')) <> ''
+                          THEN COALESCE(det.QUANTITY, 0) * COALESCE(det.UNITPRICE, 0)
+                            * (1 - COALESCE(CAST(NULLIF(TRIM(det.DISCPC), '') AS DOUBLE PRECISION), 0) / 100)
+                            * COALESCE(so.TAX1RATE, 0) / 100 ELSE 0 END),
+                    CASE
+                      WHEN SUM(CASE WHEN {line_closed_expr} <> 0 THEN 1 ELSE 0 END) = COUNT(*) THEN 'Ditutup'
+                      WHEN SUM(CASE WHEN COALESCE(det.QUANTITY, 0) > 0 AND COALESCE(det.QTYSHIPPED, 0) >= COALESCE(det.QUANTITY, 0) THEN 1 ELSE 0 END) = COUNT(*) THEN 'Diterima'
+                      WHEN SUM(CASE WHEN COALESCE(det.QTYSHIPPED, 0) > 0 THEN 1 ELSE 0 END) > 0 THEN 'Diproses'
+                      ELSE 'Menunggu'
+                    END,
+                    so.DESCRIPTION
+                FROM SO so
+                LEFT JOIN PERSONDATA pd ON pd.ID = so.CUSTOMERID
+                LEFT JOIN SALESMAN sm ON sm.SALESMANID = so.SALESMANID
+                LEFT JOIN SODET det ON det.SOID = so.SOID
+                WHERE {where_sql}
+                GROUP BY so.SOID, so.SODATE, sm.FIRSTNAME, sm.LASTNAME,
+                         pd.PERSONNO, pd.NAME, so.SONO, so.PONO, so.DESCRIPTION
+                ORDER BY so.SODATE DESC, so.SONO
+            """
+            cur.execute(sql, [limit, offset] + params)
+            rows = [{
+                "Tanggal SO": row[0], "Under": "GTE", "Penjual": str(row[1] or "").strip(),
+                "No. Customer": str(row[2] or "").strip(), "Nama Customer": str(row[3] or "").strip(),
+                "No. SO": str(row[4] or "").strip(), "No. PO": str(row[5] or "").strip(),
+                "Nilai SO": float(row[6] or 0), "Status": str(row[7] or ""), "Catatan": str(row[8] or "").strip(),
+            } for row in cur.fetchall()]
+        else:
+            cur.execute(f"SELECT COUNT(*) FROM SO so LEFT JOIN PERSONDATA pd ON pd.ID = so.CUSTOMERID LEFT JOIN SODET det ON det.SOID = so.SOID WHERE {where_sql}", params)
+            total = int((cur.fetchone() or [0])[0] or 0)
+            sql = f"""
+                SELECT FIRST ? SKIP ? so.SODATE, COALESCE(sm.FIRSTNAME || ' ' || sm.LASTNAME, ''),
+                    pd.PERSONNO, pd.NAME, so.SONO, so.PONO, det.ITEMNO,
+                    COALESCE(det.ITEMOVDESC, i.ITEMDESCRIPTION), det.QUANTITY, det.ITEMUNIT,
+                    det.QUANTITY * det.UNITPRICE * (1 - COALESCE(CAST(NULLIF(TRIM(det.DISCPC), '') AS DOUBLE PRECISION), 0) / 100)
+                    + CASE WHEN TRIM(COALESCE(det.TAXCODES, '')) <> ''
+                      THEN det.QUANTITY * det.UNITPRICE
+                        * (1 - COALESCE(CAST(NULLIF(TRIM(det.DISCPC), '') AS DOUBLE PRECISION), 0) / 100)
+                        * COALESCE(so.TAX1RATE, 0) / 100 ELSE 0 END,
+                    c.NAME, i.ITEMTYPE, ct.TYPENAME,
+                    CASE WHEN COALESCE(det.QUANTITY, 0) > 0 AND COALESCE(det.QTYSHIPPED, 0) >= COALESCE(det.QUANTITY, 0) THEN 'Diterima'
+                         WHEN {line_closed_expr} <> 0 THEN 'Ditutup'
+                         WHEN COALESCE(det.QTYSHIPPED, 0) > 0 THEN 'Diproses' ELSE 'Menunggu' END
+                FROM SO so
+                LEFT JOIN PERSONDATA pd ON pd.ID = so.CUSTOMERID
+                LEFT JOIN SALESMAN sm ON sm.SALESMANID = so.SALESMANID
+                LEFT JOIN SODET det ON det.SOID = so.SOID
+                LEFT JOIN ITEM i ON i.ITEMNO = det.ITEMNO
+                LEFT JOIN ITEMCATEGORY c ON c.CATEGORYID = i.CATEGORYID
+                LEFT JOIN CUSTTYPE ct ON ct.CUSTOMERTYPEID = pd.CUSTOMERTYPEID
+                WHERE {where_sql}
+                ORDER BY so.SODATE DESC, so.SONO, det.SEQ
+            """
+            cur.execute(sql, [limit, offset] + params)
+            rows = [{
+                "Tanggal SO": row[0], "Under": "GTE", "Penjual": str(row[1] or "").strip(),
+                "No. Customer": str(row[2] or "").strip(), "Nama Customer": str(row[3] or "").strip(),
+                "No. SO": str(row[4] or "").strip(), "No. PO": str(row[5] or "").strip(),
+                "No. Barang": str(row[6] or "").strip(), "Deskripsi Barang": str(row[7] or "").strip(),
+                "Kuantitas": float(row[8] or 0), "Satuan": str(row[9] or "").strip(),
+                "Nilai Item": float(row[10] or 0), "Kategori Produk": str(row[11] or "").strip(),
+                "Jenis Produk": {0: "Barang", 1: "Jasa"}.get(int(row[12] or 0), str(row[12] or "")),
+                "Tipe Pelanggan": str(row[13] or "").strip(), "Status": str(row[14] or ""),
+            } for row in cur.fetchall()]
+        return total, rows
+    finally:
+        con.close()
+
+
+def _so_import_response(resource, offset, limit):
+    total, rows = _so_import_rows(resource, offset, limit)
+    return {
+        "success": True, "api_version": "v1", "resource": resource,
+        "generated_at": datetime.now().astimezone().isoformat(),
+        "data": _json_rows(rows),
+        "meta": {
+            "offset": offset, "page": (offset // limit) + 1, "limit": limit,
+            "count": len(rows), "total": total,
+            "total_page": (total + limit - 1) // limit if limit else 1,
+            "has_more": offset + len(rows) < total,
+            "date_getting_data": datetime.now().astimezone().isoformat(),
+            "date_from": request.args.get("date_from", ""),
+            "date_to": request.args.get("date_to", ""),
         },
     }, 200
 
@@ -1068,6 +1240,79 @@ def register_integration_api(app):
     @blueprint.get("/pembelian")
     def pembelian():
         return list_resource("pembelian", "/api/pembelian")
+
+    def so_import_resource(resource, columns, summary):
+        auth_error = _auth_error()
+        if auth_error:
+            return auth_error
+        parameter_error = _unknown_params(resource)
+        if parameter_error:
+            return parameter_error
+        offset, limit, pagination_error = _pagination()
+        if pagination_error:
+            return pagination_error
+        try:
+            response_data, status_code = _so_import_response(resource, offset, limit)
+            response_data["schema"] = {
+                "columns": list(columns),
+                "grain": summary,
+            }
+            return jsonify(response_data), status_code
+        except Exception:
+            app.logger.exception("Failed fetching %s", resource)
+            return _error_response(resource, 500, {})
+
+    @blueprint.get("/penjualan-item-oriented/header-so")
+    def penjualan_item_oriented_header_so():
+        """
+        SO Header import data, one row per Sales Order.
+        ---
+        tags:
+          - Integration
+        security:
+          - ApiKey: []
+        parameters:
+          - {name: page, in: query, type: integer, minimum: 1}
+          - {name: offset, in: query, type: integer, minimum: 0}
+          - {name: limit, in: query, type: integer, minimum: 1, maximum: 500, default: 100}
+          - {name: search, in: query, type: string}
+          - {name: date_from, in: query, type: string, format: date}
+          - {name: date_to, in: query, type: string, format: date}
+        responses:
+          200:
+            description: SO Header dengan kolom import exact.
+        """
+        return so_import_resource(
+            "penjualan-item-oriented-header", SO_HEADER_COLUMNS,
+            "one row per Sales Order",
+        )
+
+    @blueprint.get("/penjualan-item-oriented/item-so")
+    def penjualan_item_oriented_item_so():
+        """
+        SO Item import data, one row per Sales Order item.
+        ---
+        tags:
+          - Integration
+        security:
+          - ApiKey: []
+        parameters:
+          - {name: page, in: query, type: integer, minimum: 1}
+          - {name: offset, in: query, type: integer, minimum: 0}
+          - {name: limit, in: query, type: integer, minimum: 1, maximum: 500, default: 100}
+          - {name: search, in: query, type: string}
+          - {name: date_from, in: query, type: string, format: date}
+          - {name: date_to, in: query, type: string, format: date}
+          - {name: no_so, in: query, type: string, description: Filter exact nomor SO.}
+          - {name: status, in: query, type: string, enum: [waiting, process, received, closed]}
+        responses:
+          200:
+            description: SO Item dengan kolom import exact.
+        """
+        return so_import_resource(
+            "penjualan-item-oriented-item", SO_ITEM_COLUMNS,
+            "one row per Sales Order item",
+        )
 
     @blueprint.get("/saved-reports")
     def saved_reports():
