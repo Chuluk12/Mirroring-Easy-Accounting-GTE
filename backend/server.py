@@ -389,7 +389,7 @@ MODULE_COLUMNS = {
         "hpp_total_actual", "hpp_per_unit", "hpp_per_unit_spk", "hpp_status",
         "material_cost_diff", "production_cost_diff", "total_cost_diff",
         "no_pesanan", "no_po", "sales_unit_price", "sales_total", "sales_price_source",
-        "wip_reconciliation",
+        "wip_reconciliation", "remarks",
     ],
     "spm": [
         "no_pengeluaran", "tgl_pengeluaran", "no_pk", "tgl_pk", "deskripsi",
@@ -498,7 +498,7 @@ MODULE_REQUIRED_RESPONSE_KEYS = {
         "qty_berhenti_produksi",
         "total_mat_plan", "total_mat_keluar", "material_progress", "production_status",
         "hpp_total_actual", "hpp_per_unit", "hpp_per_unit_spk", "hpp_status",
-        "wip_reconciliation",
+        "wip_reconciliation", "remarks",
     ],
     "spm": ["no_pengeluaran", "no_barang"],
     "gp": ["no_hasil", "no_barang"],
@@ -10030,6 +10030,97 @@ def api_monitoring_formula_products():
             con.close()
 
 
+def _ensure_monitoring_formula_remarks_table():
+    con = connect_dashboard_db()
+    cur = con.cursor()
+    if DASHBOARD_DB_KIND == "postgres":
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS monitoring_formula_remarks (
+                wodet_id BIGINT PRIMARY KEY,
+                remarks TEXT NOT NULL DEFAULT '',
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_by TEXT
+            )
+        """)
+    else:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS monitoring_formula_remarks (
+                wodet_id INTEGER PRIMARY KEY,
+                remarks TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_by TEXT
+            )
+        """)
+    con.commit()
+    con.close()
+
+
+def _get_monitoring_formula_remarks(wodet_ids):
+    ids = sorted({int(value) for value in wodet_ids if value})
+    if not ids:
+        return {}
+    _ensure_monitoring_formula_remarks_table()
+    con = connect_dashboard_db()
+    cur = con.cursor()
+    result = {}
+    for start in range(0, len(ids), 500):
+        chunk = ids[start:start + 500]
+        placeholders = ",".join("?" for _ in chunk)
+        cur.execute(
+            f"SELECT wodet_id, remarks FROM monitoring_formula_remarks WHERE wodet_id IN ({placeholders})",
+            chunk,
+        )
+        result.update({int(row[0]): row[1] for row in cur.fetchall()})
+    con.close()
+    return result
+
+
+@app.route("/api/monitoring-formula/<int:wodet_id>/remarks", methods=["PUT"])
+@jwt_required()
+def api_monitoring_formula_remarks(wodet_id):
+    if not check_permission("spk"):
+        return jsonify({"message": "Akses ditolak"}), 403
+    if wodet_id < 1:
+        return jsonify({"message": "ID SPK tidak valid"}), 400
+    payload = request.get_json(silent=True) or {}
+    remarks = payload.get("remarks", "")
+    if not isinstance(remarks, str):
+        return jsonify({"message": "Remarks harus berupa teks"}), 400
+    remarks = remarks.strip()
+    if len(remarks) > 1000:
+        return jsonify({"message": "Remarks maksimal 1000 karakter"}), 400
+
+    user = get_current_user()
+    _ensure_monitoring_formula_remarks_table()
+    con = connect_dashboard_db()
+    cur = con.cursor()
+    if DASHBOARD_DB_KIND == "postgres":
+        cur.execute("""
+            INSERT INTO monitoring_formula_remarks (wodet_id, remarks, updated_at, updated_by)
+            VALUES (?, ?, CURRENT_TIMESTAMP, ?)
+            ON CONFLICT (wodet_id) DO UPDATE SET
+                remarks = EXCLUDED.remarks,
+                updated_at = CURRENT_TIMESTAMP,
+                updated_by = EXCLUDED.updated_by
+        """, (wodet_id, remarks, user.get("username", "")))
+    else:
+        cur.execute("""
+            INSERT INTO monitoring_formula_remarks (wodet_id, remarks, updated_at, updated_by)
+            VALUES (?, ?, CURRENT_TIMESTAMP, ?)
+            ON CONFLICT(wodet_id) DO UPDATE SET
+                remarks = excluded.remarks,
+                updated_at = CURRENT_TIMESTAMP,
+                updated_by = excluded.updated_by
+        """, (wodet_id, remarks, user.get("username", "")))
+    con.commit()
+    con.close()
+    audit_current_user(
+        "update", "monitoring_formula",
+        description=f"Memperbarui remarks Monitoring Formula untuk WODET {wodet_id}",
+    )
+    return jsonify({"wodet_id": wodet_id, "remarks": remarks})
+
+
 @app.route("/api/monitoring-formula")
 @jwt_required()
 def api_monitoring_formula():
@@ -10599,6 +10690,12 @@ def api_monitoring_formula():
                 "materials": materials,
                 "production_details": production_details,
             })
+
+        remarks_by_wodet = _get_monitoring_formula_remarks(
+            item.get("wodet_id") for item in data
+        )
+        for item in data:
+            item["remarks"] = remarks_by_wodet.get(int(item.get("wodet_id") or 0), "")
 
         if qty_only:
             money_keys = {

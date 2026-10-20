@@ -44,6 +44,7 @@ const MONITORING_FORMULA_EXPORT_COLS = [
   { key: 'no_barang', label: 'No Barang Jadi' },
   { key: 'nama_barang', label: 'Deskripsi Barang Jadi' },
   { key: 'spk_note', label: 'Note SPK' },
+  { key: 'remarks', label: 'Remarks' },
   { key: 'qty_spk', label: 'Qty SPK (Barang Jadi)', type: 'number' },
   { key: 'qty_hasil_produksi', label: 'Qty GP', type: 'number' },
   { key: 'uom', label: 'UOM Barang Jadi' },
@@ -80,6 +81,7 @@ const PRODUCTION_COST_EXPORT_COLS = [
   { key: 'spk_unit_cost', label: 'Biaya/Jam SPK', type: 'accounting', permissionKey: 'spk_production_cost' },
   { key: 'formula_cost_for_spk_qty', label: 'Jumlah Biaya Formula', type: 'accounting', permissionKey: 'formula_production_cost' },
   { key: 'spk_cost', label: 'Jumlah Biaya SPK', type: 'accounting', permissionKey: 'spk_production_cost' },
+  { key: 'remarks', label: 'Remarks' },
 ]
 
 const SALES_PRICE_EXPORT_COLS = [
@@ -103,6 +105,7 @@ const SALES_PRICE_EXPORT_COLS = [
   { key: 'hpp_per_unit_spk', label: 'HPP/Unit Berdasarkan Qty SPK', type: 'accounting' },
   { key: 'spk_total_cost', label: 'Total HPP SPK', type: 'accounting' },
   { key: 'sales_price_source', label: 'Sumber Harga Jual' },
+  { key: 'remarks', label: 'Remarks' },
 ]
 
 const EXPORT_PARENT_COLS = [
@@ -116,6 +119,7 @@ const EXPORT_PARENT_COLS = [
   { key: 'qty_hasil_produksi', label: 'Hasil Produksi / GP', type: 'number' },
   { key: 'uom', label: 'UoM' },
   { key: 'no_formula', label: 'No Formula' },
+  { key: 'remarks', label: 'Remarks' },
 ]
 
 const MATERIAL_DETAIL_EXPORT_COLS = [
@@ -274,6 +278,7 @@ export default function MonitoringFormula() {
   const [selectedPrintKeys, setSelectedPrintKeys] = useState([])
   const [printLoading, setPrintLoading] = useState(false)
   const [wipLoadingIds, setWipLoadingIds] = useState({})
+  const [savingRemarkIds, setSavingRemarkIds] = useState({})
 
   const searchRef = useRef('')
   const statusRef = useRef('')
@@ -396,6 +401,29 @@ export default function MonitoringFormula() {
     fetchData(1, DEFAULT_PAGE_SIZE, '', currentMonth, '')
   }
 
+  const updateRemark = (wodetId, remarks) => {
+    setData(prev => prev.map(row => (
+      Number(row.wodet_id) === Number(wodetId) ? { ...row, remarks } : row
+    )))
+  }
+
+  const saveRemark = async record => {
+    const wodetId = record?.wodet_id
+    if (!wodetId) return
+    setSavingRemarkIds(prev => ({ ...prev, [wodetId]: true }))
+    try {
+      const res = await api.put(`/api/monitoring-formula/${wodetId}/remarks`, {
+        remarks: record.remarks || '',
+      })
+      updateRemark(wodetId, res.data.remarks || '')
+    } catch (error) {
+      console.error('Gagal menyimpan remarks monitoring formula:', error)
+      message.error(getApiErrorMessage(error, 'Gagal menyimpan remarks'))
+    } finally {
+      setSavingRemarkIds(prev => ({ ...prev, [wodetId]: false }))
+    }
+  }
+
   const loadWipReconciliation = useCallback(async record => {
     const wodetId = record?.wodet_id
     if (!wodetId || record?.wip_loaded || (record?.wip_reconciliation?.rows || []).length > 0) return
@@ -456,6 +484,7 @@ export default function MonitoringFormula() {
     spk_total_cost: row.spk_total_cost,
     sales_price_source: row.sales_price_source,
     no_formula: row.no_formula,
+    remarks: row.remarks,
   })
 
   const buildMaterialExportRows = rows => rows.flatMap(row => (
@@ -1255,6 +1284,24 @@ export default function MonitoringFormula() {
         return <Text type={amount > 0 ? 'danger' : amount < 0 ? 'success' : 'secondary'}>{formatCurrency(amount)}</Text>
       },
     },
+    {
+      title: 'Remarks',
+      dataIndex: 'remarks',
+      key: 'remarks',
+      width: 240,
+      render: (value, record) => (
+        <Input
+          value={value || ''}
+          placeholder="Catatan..."
+          maxLength={1000}
+          showCount
+          disabled={!!savingRemarkIds[record.wodet_id]}
+          onChange={event => updateRemark(record.wodet_id, event.target.value)}
+          onBlur={() => saveRemark(record)}
+          onPressEnter={event => event.currentTarget.blur()}
+        />
+      ),
+    },
   ]
 
   const materialColumns = [
@@ -1720,7 +1767,7 @@ export default function MonitoringFormula() {
           loading={{ spinning: loading, tip: loadingMsg }}
           locale={{ emptyText: loading && !hasLoaded ? 'Memuat data bulan berjalan...' : 'Tidak ada data' }}
           size="small"
-          scroll={{ x: 2850, y: 'calc(100vh - 315px)' }}
+          scroll={{ x: 3100, y: 'calc(100vh - 315px)' }}
           expandable={{
             expandedRowRender: record => (
               <Space direction="vertical" size={12} style={{ width: '100%' }}>
