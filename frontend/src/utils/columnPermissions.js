@@ -10,7 +10,7 @@ export function filterColumnsByPermission(module, columns, user) {
       && column.dataIndex.startsWith('qty_')
       && allowedSet.has('warehouse_quantities')
     ) return true
-    return allowedSet.has(column.dataIndex)
+    return allowedSet.has(column.permissionKey || column.dataIndex)
   })
 }
 

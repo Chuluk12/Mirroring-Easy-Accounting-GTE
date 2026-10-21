@@ -232,6 +232,7 @@ const SO_EXPORT_COLS = [
   { key: 'no_po_customer',   label: 'No PO Customer' },
   { key: 'nama_salesman',    label: 'Salesman' },
   { key: 'no_barang',        label: 'No Barang' },
+  { key: 'code_product',     label: 'Code Product', permissionKey: 'no_barang' },
   { key: 'deskripsi_barang', label: 'Deskripsi Barang' },
   { key: 'qty',              label: 'Qty Order',       type: 'number' },
   { key: 'qty_shipped',      label: 'Qty Shipped',     type: 'number' },
@@ -430,6 +431,8 @@ function TabSO() {
     },
     { title: 'No. Barang', dataIndex: 'no_barang', key: 'no_barang', width: 160,
       render: v => <Text code style={{ fontSize: 12 }}>{v || '-'}</Text> },
+    { title: 'Code Product', dataIndex: 'code_product', key: 'code_product', width: 160,
+      permissionKey: 'no_barang', render: v => v || '-' },
     { title: 'Deskripsi Barang', dataIndex: 'deskripsi_barang', key: 'deskripsi_barang', width: 260, ellipsis: { showTitle: false },
       render: v => <Tooltip title={v}><span>{v || '-'}</span></Tooltip> },
     { title: 'Qty Order', dataIndex: 'qty', key: 'qty', width: 95, align: 'right',
@@ -486,6 +489,8 @@ function TabSO() {
   ]
   const detailColumns = [
     { title: 'No Barang', dataIndex: 'no_barang', width: 130, render: v => <Text code>{v || '-'}</Text> },
+    { title: 'Code Product', dataIndex: 'code_product', width: 150,
+      permissionKey: 'no_barang', render: v => v || '-' },
     { title: 'Deskripsi', dataIndex: 'deskripsi_barang', width: 220, ellipsis: true },
     { title: 'Qty', dataIndex: 'qty', width: 80, align: 'right', render: v => formatQty(v) },
     { title: 'Terkirim', dataIndex: 'qty_shipped', width: 85, align: 'right', render: v => formatQty(v) },

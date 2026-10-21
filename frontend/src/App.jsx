@@ -35,6 +35,7 @@ const Formula = lazy(() => import('./pages/Manufaktur/Formula'))
 const MonitoringFormula = lazy(() => import('./pages/Manufaktur/MonitoringFormula'))
 const SPM = lazy(() => import('./pages/Manufaktur/SPM'))
 const GP = lazy(() => import('./pages/Manufaktur/GP'))
+const MonitoringGP = lazy(() => import('./pages/Manufaktur/MonitoringGP'))
 const BiayaProduksi = lazy(() => import('./pages/Manufaktur/BiayaProduksi'))
 const StandarisasiHarga = lazy(() => import('./pages/Manufaktur/StandarisasiHarga'))
 const FIFO = lazy(() => import('./pages/Manufaktur/FIFO'))
@@ -90,6 +91,7 @@ function AppRoutes() {
           <Route path="manufaktur/monitoring-formula" element={<PrivateRoute module="spk_monitoring_formula"><MonitoringFormula /></PrivateRoute>} />
           <Route path="manufaktur/spm" element={<PrivateRoute module="spk_spm"><SPM /></PrivateRoute>} />
           <Route path="manufaktur/gp"  element={<PrivateRoute module="spk_gp"><GP  /></PrivateRoute>} />
+          <Route path="manufaktur/monitoring-gp" element={<PrivateRoute module="spk_gp"><MonitoringGP /></PrivateRoute>} />
           <Route path="manufaktur/biaya-produksi" element={<PrivateRoute module="spk_biaya_produksi"><BiayaProduksi /></PrivateRoute>} />
           <Route path="manufaktur/standarisasi-harga" element={<PrivateRoute module="spk_standarisasi_harga"><StandarisasiHarga /></PrivateRoute>} />
           <Route path="manufaktur/fifo" element={<PrivateRoute module="spk_fifo"><FIFO /></PrivateRoute>} />

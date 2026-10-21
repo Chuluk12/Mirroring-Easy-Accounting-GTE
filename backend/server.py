@@ -331,7 +331,7 @@ MODULE_COLUMNS = {
     ],
     "penjualan_so": [
         "no_so", "tgl_so", "tgl_estimasi", "under", "no_pelanggan", "nama_pelanggan",
-        "no_po_customer", "nama_salesman", "no_barang", "deskripsi_barang", "qty",
+        "no_po_customer", "nama_salesman", "no_barang", "code_product", "deskripsi_barang", "qty",
         "qty_shipped", "sisa_kirim", "stok_tersedia", "uom", "unit_price", "disc_pct",
         "ppn_rate", "ppn_amount", "subtotal", "amount", "no_pengiriman",
         "tgl_pengiriman", "no_spk", "tgl_spk", "estimasi_spk", "material_progress",
@@ -480,7 +480,7 @@ MODULE_REQUIRED_RESPONSE_KEYS = {
     "pemasok": ["id", "no_pemasok", "nama_pemasok", "dihentikan"],
     "penerimaan": ["no_penerimaan", "no_barang"],
     "fpb": ["no_faktur"],
-    "penjualan_so": ["no_so", "no_barang"],
+    "penjualan_so": ["no_so", "no_barang", "code_product"],
     "penjualan": ["no_penjualan", "no_barang"],
     "penjualan_do": ["no_pengiriman", "no_barang"],
     "invoice": ["no_faktur"],
@@ -491,6 +491,7 @@ MODULE_REQUIRED_RESPONSE_KEYS = {
     "fifo": ["no_barang"],
     "monitoring_formula": [
         "wodet_id", "no_spk", "no_barang", "product_code", "materials", "production_details",
+        "gp_id", "gp_detail_id", "no_gp", "tgl_gp", "tgl_spk", "qty_gp", "deskripsi_gp",
         "spk_note", "no_job",
         "tgl_selesai", "qty_hasil_produksi", "production_progress", "production_results",
         "tgl_qc", "status_qc", "progress_qc",
@@ -6902,10 +6903,11 @@ def _so_line_closed_expr(cur):
     return "COALESCE(so.CLOSED, 0)"
 
 
-def _so_select_sql(line_closed_expr):
+def _so_select_sql(line_closed_expr, code_product_expr):
     return f"""
         {_SO_SELECT},
-        {line_closed_expr} AS LINE_CLOSED
+        {line_closed_expr} AS LINE_CLOSED,
+        {code_product_expr} AS CODE_PRODUCT
     """
 
 
@@ -6987,6 +6989,7 @@ def _build_so_rows(rows, delivery_map=None, spk_map=None):
             "deskripsi_so":     str(row[6]  or "").strip(),
             "nama_salesman":    str(row[7]  or "").strip(),
             "no_barang":        str(row[8]  or "").strip(),
+            "code_product":     str(row[26] or "").strip(),
             "deskripsi_barang": str(row[13] or "").strip(),
             "qty":              qty,
             "qty_shipped":      qty_shipped,
@@ -7465,7 +7468,7 @@ def api_penjualan_so():
 
         line_closed_expr = _so_line_closed_expr(cur)
         where_sql, params_where = _so_where_clause(search, date_from, date_to, status, line_closed_expr)
-        so_select = _so_select_sql(line_closed_expr)
+        so_select = _so_select_sql(line_closed_expr, _stock_code_product_expr(cur))
 
         # Data rows
         sql = f"""
@@ -7631,7 +7634,7 @@ def api_dashboard_sales_transactions():
             where_sql += " AND pd.PERSONNO = ?"
             params_where.append(code)
 
-        so_select = _so_select_sql(line_closed_expr)
+        so_select = _so_select_sql(line_closed_expr, _stock_code_product_expr(cur))
         cur.execute(f"""
             SELECT FIRST ? SKIP ?
                 {so_select}
@@ -7752,7 +7755,7 @@ def api_penjualan_so_export():
 
         line_closed_expr = _so_line_closed_expr(cur)
         where_sql, params_where = _so_where_clause(search, date_from, date_to, status, line_closed_expr)
-        so_select = _so_select_sql(line_closed_expr)
+        so_select = _so_select_sql(line_closed_expr, _stock_code_product_expr(cur))
 
         # Tidak pakai FIRST/SKIP — ambil semua
         sql = f"""
@@ -8929,7 +8932,7 @@ def _monitoring_formula_product_expr(cur):
     return f"TRIM(i.{column})" if column else "CAST('' AS VARCHAR(255))"
 
 
-def _monitoring_formula_where_clause(search="", date_from="", date_to="", wodet_id="", no_spk="", product="", product_expr="CAST('' AS VARCHAR(255))"):
+def _monitoring_formula_where_clause(search="", date_from="", date_to="", wodet_id="", no_spk="", product="", product_expr="CAST('' AS VARCHAR(255))", wodet_ids=None):
     conditions = ["1=1"]
     params = []
 
@@ -8961,6 +8964,10 @@ def _monitoring_formula_where_clause(search="", date_from="", date_to="", wodet_
     if wodet_id:
         conditions.append("det.ID = ?")
         params.append(int(wodet_id))
+
+    if wodet_ids:
+        conditions.append(f"det.ID IN ({','.join('?' for _ in wodet_ids)})")
+        params.extend(wodet_ids)
 
     if no_spk:
         conditions.append("w.WONO = ?")
@@ -10132,6 +10139,15 @@ def api_monitoring_formula():
         date_to = request.args.get("date_to", "")
         status = request.args.get("status", "").strip()
         wodet_id_filter = request.args.get("wodet_id", "").strip()
+        wodet_ids_raw = request.args.get("wodet_ids", "").strip()
+        wodet_ids_filter = []
+        if wodet_ids_raw:
+            try:
+                wodet_ids_filter = list(dict.fromkeys(int(value.strip()) for value in wodet_ids_raw.split(",")))
+            except ValueError:
+                return jsonify({"message": "wodet_ids harus berisi angka dipisahkan koma"}), 400
+            if not wodet_ids_filter or len(wodet_ids_filter) > 200 or any(value <= 0 for value in wodet_ids_filter):
+                return jsonify({"message": "wodet_ids maksimal 200 ID positif"}), 400
         no_spk_filter = request.args.get("no_spk", "").strip()
         product_filter = request.args.get("product", "").strip()
         sort_by = request.args.get("sort_by", "").strip()
@@ -10142,7 +10158,7 @@ def api_monitoring_formula():
         include_wip = request.args.get("include_wip", "").lower() in ("1", "true", "yes")
         skip_count = request.args.get("skip_count", "").lower() in ("1", "true", "yes")
         bulk_export = request.args.get("bulk_export", "").lower() in ("1", "true", "yes")
-        max_limit = 500 if no_spk_filter else (250 if bulk_export else (50 if skip_count else 10))
+        max_limit = 200 if wodet_ids_filter else (500 if no_spk_filter else (250 if bulk_export else (50 if skip_count else 10)))
         limit = max(1, min(requested_limit, max_limit)) if not search else max(1, requested_limit)
         query_limit = limit + 1 if skip_count else limit
         sort_fields = {
@@ -10167,6 +10183,7 @@ def api_monitoring_formula():
             search, date_from, date_to, wodet_id_filter, no_spk_filter,
             product=product_filter,
             product_expr=_monitoring_formula_product_expr(cur) if product_filter else "CAST('' AS VARCHAR(255))",
+            wodet_ids=wodet_ids_filter,
         )
         wodet_columns = set(_get_table_columns(cur, "WODET"))
         def _truthy_sql_expr(alias, column):
@@ -11393,6 +11410,85 @@ def _gp_status_condition(status):
         "Belum Jadi": "COALESCE(prd.QUANTITY, 0) <= 0",
     }
     return status_rules.get(status)
+
+@app.route("/api/monitoring-gp")
+@jwt_required()
+def api_monitoring_gp():
+    if not check_permission("spk"):
+        return jsonify({"message": "Akses ditolak"}), 403
+    con = None
+    try:
+        search = request.args.get("search", "").strip()
+        date_from = request.args.get("date_from", "").strip()
+        date_to = request.args.get("date_to", "").strip()
+        offset = max(int(request.args.get("offset", 0)), 0)
+        limit = min(max(int(request.args.get("limit", 20)), 1), 200)
+        conditions = ["prd.ITEMNO IS NOT NULL"]
+        params = []
+        if date_from:
+            conditions.append("pr.RESULTDATE >= ?")
+            params.append(date_from)
+        if date_to:
+            conditions.append("pr.RESULTDATE < DATEADD(1 DAY TO CAST(? AS DATE))")
+            params.append(date_to)
+        if search:
+            conditions.append("""(
+                pr.RESULTNO CONTAINING ? OR wo.WONO CONTAINING ?
+                OR prd.ITEMNO CONTAINING ? OR i.ITEMDESCRIPTION CONTAINING ?
+                OR pr.DESCRIPTION CONTAINING ?
+            )""")
+            params.extend([search] * 5)
+        where_sql = " AND ".join(conditions)
+        from_sql = """
+            FROM PRODRESULT pr
+            JOIN PRODRESULTDET prd ON prd.PRODRESULTID = pr.ID
+            LEFT JOIN WO wo ON wo.ID = pr.WOID
+            LEFT JOIN WODET wd ON wd.ID = prd.WODETID
+            LEFT JOIN ITEM i ON i.ITEMNO = prd.ITEMNO
+        """
+        con = fdb.connect(**DB_CONFIG)
+        cur = con.cursor()
+        cur.execute(f"SELECT COUNT(*) {from_sql} WHERE {where_sql}", params)
+        total = int(cur.fetchone()[0] or 0)
+        cur.execute(f"""
+            SELECT FIRST ? SKIP ?
+                pr.ID, prd.ID, pr.RESULTNO, pr.RESULTDATE, wo.WONO, wo.WODATE,
+                pr.DESCRIPTION, prd.ITEMNO, i.ITEMDESCRIPTION,
+                prd.QUANTITY, prd.UNIT, wd.QUANTITY, prd.WODETID,
+                prd.COST, wd.NOJOB
+            {from_sql}
+            WHERE {where_sql}
+            ORDER BY pr.RESULTDATE DESC, pr.RESULTNO DESC, prd.ID
+        """, [limit, offset, *params])
+        data = []
+        for row in cur.fetchall():
+            qty_gp = float(row[9] or 0)
+            qty_spk = float(row[11] or 0)
+            data.append({
+                "gp_id": row[0], "gp_detail_id": row[1],
+                "no_gp": str(row[2] or "").strip(),
+                "tgl_gp": str(row[3])[:10] if row[3] else "",
+                "no_spk": str(row[4] or "").strip(),
+                "tgl_spk": str(row[5])[:10] if row[5] else "",
+                "deskripsi_gp": str(row[6] or "").strip(),
+                "no_barang": str(row[7] or "").strip(),
+                "nama_barang": str(row[8] or "").strip(),
+                "qty_gp": qty_gp, "qty_spk": qty_spk,
+                "uom": str(row[10] or "").strip(),
+                "wodet_id": row[12], "biaya_gp": float(row[13] or 0),
+                "no_job": str(row[14] or "").strip(),
+                "persentase": round(min(qty_gp / qty_spk * 100, 100), 1) if qty_spk > 0 else 0,
+            })
+        return jsonify({"data": filter_record_columns("monitoring_formula", data), "total": total})
+    except (TypeError, ValueError):
+        return jsonify({"message": "Offset atau limit tidak valid"}), 400
+    except Exception as exc:
+        app.logger.exception("Monitoring GP gagal: %s", exc)
+        return jsonify({"message": "Gagal memuat Monitoring GP"}), 500
+    finally:
+        if con is not None:
+            con.close()
+
 
 @app.route("/api/gp")
 @jwt_required()

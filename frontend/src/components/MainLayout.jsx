@@ -193,6 +193,7 @@ export default function MainLayout() {
     }
     if (hasPermission('spk_gp')) {
       manufakturChildren.push({ key: '/manufaktur/gp', icon: <CheckCircleOutlined />, label: 'GP' })
+      manufakturChildren.push({ key: '/manufaktur/monitoring-gp', icon: <CheckCircleOutlined />, label: 'Monitoring GP' })
     }
     if (hasPermission('spk_biaya_produksi')) {
       manufakturChildren.push({ key: '/manufaktur/biaya-produksi', icon: <DollarOutlined />, label: 'Biaya Produksi' })
