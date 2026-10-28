@@ -384,6 +384,20 @@ function TabSO() {
     })
   }
 
+  const handleExportSinceJanuary2026 = () => {
+    exportToExcel({
+      endpoint: '/api/penjualan-so/export',
+      params: { date_from: '2026-01-01', date_to: dayjs().format('YYYY-MM-DD') },
+      filename: `SalesOrder_2026-01-01_sd_${dayjs().format('YYYY-MM-DD')}`,
+      columns: [
+        SO_EXPORT_COLS[0],
+        ...filterExportColumnsByPermission('penjualan_so', SO_EXPORT_COLS.slice(1), user),
+      ],
+      token,
+      setExporting,
+    })
+  }
+
   const serialColumn = {
     title: 'No',
     key: 'no',
@@ -538,6 +552,10 @@ function TabSO() {
             onSearch={handleSearch}
               onChange={e => setSearch(e.target.value)} />
             <Button icon={<ReloadOutlined />} onClick={handleReset}>Reset</Button>
+            <Button icon={<FileExcelOutlined />} onClick={handleExportSinceJanuary2026}
+              disabled={exporting}>
+              Export Jan 2026–Hari Ini
+            </Button>
             <Button type="primary" icon={exporting ? <LoadingOutlined /> : <FileExcelOutlined />}
               onClick={handleExport} disabled={exporting}
               style={{ background: '#217346', borderColor: '#217346' }}>

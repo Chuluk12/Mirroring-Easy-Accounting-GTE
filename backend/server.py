@@ -7766,8 +7766,12 @@ def api_penjualan_so_export():
         """
         cur.execute(sql, params_where)
         rows = cur.fetchall()
-        delivery_map = _get_so_delivery_map(cur, rows)
-        spk_map = _get_so_spk_map(cur, rows)
+        delivery_map = {}
+        spk_map = {}
+        for start in range(0, len(rows), 300):
+            batch = rows[start:start + 300]
+            delivery_map.update(_get_so_delivery_map(cur, batch))
+            spk_map.update(_get_so_spk_map(cur, batch))
         con.close()
 
         data = _build_so_rows(rows, delivery_map, spk_map)
