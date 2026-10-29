@@ -20,6 +20,7 @@ export function filterExportColumnsByPermission(module, columns, user) {
 
   const allowedSet = new Set(allowed)
   return columns.filter(column => {
+    if (module === 'penjualan_so' && column.alwaysInclude) return true
     if (
       module === 'gudang'
       && typeof column.key === 'string'

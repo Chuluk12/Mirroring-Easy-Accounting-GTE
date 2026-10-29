@@ -331,7 +331,7 @@ MODULE_COLUMNS = {
     ],
     "penjualan_so": [
         "no_so", "tgl_so", "tgl_estimasi", "under", "no_pelanggan", "nama_pelanggan",
-        "no_po_customer", "nama_salesman", "no_barang", "code_product", "deskripsi_barang", "qty",
+        "no_po_customer", "no_qtn", "nama_salesman", "no_barang", "code_product", "deskripsi_barang", "qty",
         "qty_shipped", "sisa_kirim", "stok_tersedia", "uom", "unit_price", "disc_pct",
         "ppn_rate", "ppn_amount", "subtotal", "amount", "no_pengiriman",
         "tgl_pengiriman", "no_spk", "tgl_spk", "estimasi_spk", "material_progress",
@@ -480,7 +480,7 @@ MODULE_REQUIRED_RESPONSE_KEYS = {
     "pemasok": ["id", "no_pemasok", "nama_pemasok", "dihentikan"],
     "penerimaan": ["no_penerimaan", "no_barang"],
     "fpb": ["no_faktur"],
-    "penjualan_so": ["no_so", "no_barang", "code_product"],
+    "penjualan_so": ["no_so", "no_barang", "code_product", "no_spk", "tgl_spk"],
     "penjualan": ["no_penjualan", "no_barang"],
     "penjualan_do": ["no_pengiriman", "no_barang"],
     "invoice": ["no_faktur"],
@@ -521,6 +521,8 @@ def filter_record_columns(module, rows, user=None):
     if not allowed:
         return rows
     allowed_set = set(allowed) | set(MODULE_REQUIRED_RESPONSE_KEYS.get(module, []))
+    if module == "penjualan_so" and "no_po_customer" in allowed_set:
+        allowed_set.add("no_qtn")
     if module == "gudang" and "warehouse_quantities" in allowed_set:
         return [
             {
@@ -6907,7 +6909,8 @@ def _so_select_sql(line_closed_expr, code_product_expr):
     return f"""
         {_SO_SELECT},
         {line_closed_expr} AS LINE_CLOSED,
-        {code_product_expr} AS CODE_PRODUCT
+        {code_product_expr} AS CODE_PRODUCT,
+        det.ITEMRESERVED10 AS NO_QTN
     """
 
 
@@ -6986,6 +6989,7 @@ def _build_so_rows(rows, delivery_map=None, spk_map=None):
             "no_pelanggan":     str(row[3]  or "").strip(),
             "nama_pelanggan":   str(row[4]  or "").strip(),
             "no_po_customer":   str(row[5]  or "").strip(),
+            "no_qtn":           str(row[27] or "").strip(),
             "deskripsi_so":     str(row[6]  or "").strip(),
             "nama_salesman":    str(row[7]  or "").strip(),
             "no_barang":        str(row[8]  or "").strip(),
