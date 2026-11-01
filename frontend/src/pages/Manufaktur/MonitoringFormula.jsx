@@ -661,40 +661,76 @@ export default function MonitoringFormula() {
     return { materialRows, productionRows, salesRows }
   }
 
+  const fetchAllExportRows = async (dateFrom, dateTo, label) => {
+    const pageSize = 250
+    const exportRows = []
+    const filters = {
+      date_from: dateFrom,
+      date_to: dateTo,
+      ...(searchRef.current ? { search: searchRef.current } : {}),
+      ...(statusRef.current ? { status: statusRef.current } : {}),
+      ...(productRef.current ? { product: productRef.current } : {}),
+    }
+    let offset = 0
+    let hasMore = true
+
+    while (hasMore) {
+      const res = await api.get('/api/monitoring-formula', {
+        params: { ...filters, offset, limit: pageSize, bulk_export: 1, skip_count: 1 },
+        timeout: 90000,
+      })
+      const batch = res.data.data || []
+      exportRows.push(...batch)
+      offset += batch.length
+      hasMore = batch.length === pageSize
+      message.loading({ content: `Mengambil data ${label}: ${exportRows.length} baris...`, key: 'export', duration: 0 })
+    }
+
+    return exportRows
+  }
+
   const handleExport = async () => {
     setExporting(true)
     message.loading({ content: 'Menyiapkan export monitoring formula...', key: 'export', duration: 0 })
     try {
-      const exportRows = data || []
+      const dates = dateRangeRef.current
+      if (!dates?.[0] || !dates?.[1]) {
+        message.warning({ content: 'Pilih tanggal awal dan akhir untuk export', key: 'export' })
+        return
+      }
+      const dateFrom = dates[0].format('YYYY-MM-DD')
+      const dateTo = dates[1].format('YYYY-MM-DD')
+      const exportRows = await fetchAllExportRows(dateFrom, dateTo, `${dateFrom} s.d. ${dateTo}`)
       if (!exportRows.length) {
-        message.warning({ content: 'Tidak ada data yang sedang tampil untuk diekspor', key: 'export' })
+        message.warning({ content: 'Tidak ada data pada periode yang dipilih', key: 'export' })
         return
       }
 
-      const { materialRows, productionRows, salesRows } = exportMonitoringRows(exportRows, 'MonitoringFormula')
+      const filename = `MonitoringFormula_${dateFrom}_sd_${dateTo}`
+      const { materialRows, productionRows, salesRows } = exportMonitoringRows(exportRows, filename)
 
       try {
         await api.post('/api/audit/event', {
           action: 'export',
           module: 'monitoring_formula',
-          description: 'Export Monitoring Formula header utama',
+          description: `Export Monitoring Formula ${dateFrom} s.d. ${dateTo}`,
           metadata: {
-            filename: 'MonitoringFormula',
-            layout: 'main_header',
+            filename,
+            layout: 'filtered_period_full',
             rows: exportRows.length,
-            current_page: pagination.current,
-            page_size: pagination.pageSize,
+            date_from: dateFrom,
+            date_to: dateTo,
           },
         })
       } catch {
         // Audit failure should not block the downloaded export.
       }
       message.success({
-        content: `${materialRows.length} material, ${productionRows.length} biaya produksi, dan ${salesRows.length} harga jual berhasil diekspor`,
+        content: `${exportRows.length} SPK (${materialRows.length} material, ${productionRows.length} biaya produksi, ${salesRows.length} harga jual) berhasil diekspor`,
         key: 'export',
       })
     } catch (error) {
-      message.error({ content: `Gagal export: ${error.message || 'error'}`, key: 'export' })
+      message.error({ content: `Gagal export: ${getApiErrorMessage(error, error.message || 'error')}`, key: 'export' })
     } finally {
       setExporting(false)
     }
@@ -707,31 +743,7 @@ export default function MonitoringFormula() {
       const month = (dateRangeRef.current?.[0] || dayjs()).startOf('month')
       const dateFrom = month.format('YYYY-MM-DD')
       const dateTo = month.endOf('month').format('YYYY-MM-DD')
-      const pageSize = 250
-      const exportRows = []
-      let offset = 0
-      let hasMore = true
-
-      while (hasMore) {
-        const params = {
-          offset,
-          limit: pageSize,
-          bulk_export: 1,
-          skip_count: 1,
-          date_from: dateFrom,
-          date_to: dateTo,
-        }
-        if (searchRef.current) params.search = searchRef.current
-        if (statusRef.current) params.status = statusRef.current
-        if (productRef.current) params.product = productRef.current
-
-        const res = await api.get('/api/monitoring-formula', { params, timeout: 90000 })
-        const batch = res.data.data || []
-        exportRows.push(...batch)
-        hasMore = batch.length === pageSize
-        offset += batch.length
-        message.loading({ content: `Mengambil data bulan ${month.format('MMMM YYYY')}: ${exportRows.length} baris...`, key: 'export', duration: 0 })
-      }
+      const exportRows = await fetchAllExportRows(dateFrom, dateTo, `bulan ${month.format('MMMM YYYY')}`)
 
       if (!exportRows.length) {
         message.warning({ content: `Tidak ada data pada ${month.format('MMMM YYYY')}`, key: 'export' })
