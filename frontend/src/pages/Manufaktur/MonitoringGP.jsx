@@ -209,7 +209,15 @@ export default function MonitoringGP() {
 
   const exportAll = async () => {
     setExporting(true)
+    message.loading({ content: 'Menyiapkan export Monitoring GP...', key: 'monitoring-gp-export', duration: 0 })
     try {
+      const exportFilters = { dates, search }
+      if (!exportFilters.dates?.[0] || !exportFilters.dates?.[1]) {
+        message.warning({ content: 'Pilih tanggal awal dan akhir untuk export', key: 'monitoring-gp-export' })
+        return
+      }
+      const dateFrom = exportFilters.dates[0].format('YYYY-MM-DD')
+      const dateTo = exportFilters.dates[1].format('YYYY-MM-DD')
       const allRows = []
       const materialRows = []
       const productionRows = []
@@ -217,13 +225,13 @@ export default function MonitoringGP() {
       const formulaById = new Map()
       const pageSize = 200
       let offset = 0
-      let total = 0
+      let hasMore = true
       do {
         const response = await api.get('/api/monitoring-gp', {
-          params: { ...paramsFor(1, pageSize, filters), offset }, timeout: 90000,
+          params: { ...paramsFor(1, pageSize, exportFilters), offset, skip_count: 1 }, timeout: 90000,
         })
         const page = response.data.data || []
-        total = response.data.total || 0
+        hasMore = response.data.has_more === true
         const missingIds = [...new Set(page.map(row => Number(row.wodet_id)).filter(id => id && !formulaById.has(id)))]
         for (let start = 0; start < missingIds.length; start += 50) {
           const chunk = missingIds.slice(start, start + 50)
@@ -255,17 +263,21 @@ export default function MonitoringGP() {
           }
         }
         offset += page.length
-        if (!page.length) break
-      } while (offset < total)
-      if (!allRows.length) return message.info('Tidak ada data GP untuk diekspor')
+        message.loading({ content: `Mengambil data GP ${dateFrom} s.d. ${dateTo}: ${allRows.length} baris...`, key: 'monitoring-gp-export', duration: 0 })
+      } while (hasMore)
+      if (!allRows.length) {
+        message.info({ content: 'Tidak ada data GP untuk diekspor', key: 'monitoring-gp-export' })
+        return
+      }
       downloadWorkbookXLS([
         { name: 'Monitoring GP', columns: exportColumns, rows: allRows },
         { name: 'Material per GP', columns: materialExportColumns, rows: materialRows },
         { name: 'Biaya Produksi per GP', columns: productionExportColumns, rows: productionRows },
         { name: 'WIP SPK Terkait', columns: wipExportColumns, rows: wipRows },
-      ], 'Monitoring_GP')
+      ], `Monitoring_GP_${dateFrom}_sd_${dateTo}`)
+      message.success({ content: `${allRows.length} baris GP berhasil diekspor`, key: 'monitoring-gp-export' })
     } catch (error) {
-      message.error(getApiErrorMessage(error, 'Gagal mengekspor Monitoring GP'))
+      message.error({ content: getApiErrorMessage(error, 'Gagal mengekspor Monitoring GP'), key: 'monitoring-gp-export' })
     } finally {
       setExporting(false)
     }

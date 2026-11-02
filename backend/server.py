@@ -11431,6 +11431,7 @@ def api_monitoring_gp():
         date_to = request.args.get("date_to", "").strip()
         offset = max(int(request.args.get("offset", 0)), 0)
         limit = min(max(int(request.args.get("limit", 20)), 1), 200)
+        skip_count = request.args.get("skip_count", "").lower() in ("1", "true", "yes")
         conditions = ["prd.ITEMNO IS NOT NULL"]
         params = []
         if date_from:
@@ -11456,8 +11457,10 @@ def api_monitoring_gp():
         """
         con = fdb.connect(**DB_CONFIG)
         cur = con.cursor()
-        cur.execute(f"SELECT COUNT(*) {from_sql} WHERE {where_sql}", params)
-        total = int(cur.fetchone()[0] or 0)
+        total = None
+        if not skip_count:
+            cur.execute(f"SELECT COUNT(*) {from_sql} WHERE {where_sql}", params)
+            total = int(cur.fetchone()[0] or 0)
         cur.execute(f"""
             SELECT FIRST ? SKIP ?
                 pr.ID, prd.ID, pr.RESULTNO, pr.RESULTDATE, wo.WONO, wo.WODATE,
@@ -11467,7 +11470,7 @@ def api_monitoring_gp():
             {from_sql}
             WHERE {where_sql}
             ORDER BY pr.RESULTDATE DESC, pr.RESULTNO DESC, prd.ID
-        """, [limit, offset, *params])
+        """, [limit + 1 if skip_count else limit, offset, *params])
         data = []
         for row in cur.fetchall():
             qty_gp = float(row[9] or 0)
@@ -11487,7 +11490,10 @@ def api_monitoring_gp():
                 "no_job": str(row[14] or "").strip(),
                 "persentase": round(min(qty_gp / qty_spk * 100, 100), 1) if qty_spk > 0 else 0,
             })
-        return jsonify({"data": filter_record_columns("monitoring_formula", data), "total": total})
+        has_more = skip_count and len(data) > limit
+        if skip_count:
+            data = data[:limit]
+        return jsonify({"data": filter_record_columns("monitoring_formula", data), "total": total, "has_more": has_more})
     except (TypeError, ValueError):
         return jsonify({"message": "Offset atau limit tidak valid"}), 400
     except Exception as exc:
