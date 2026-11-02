@@ -354,6 +354,50 @@ def _json_rows(rows):
     ]
 
 
+def _normalize_report_date(value, name):
+    value = str(value or "").strip()
+    if not value:
+        return ""
+    for fmt in ("%Y-%m-%d", "%Y-%m-%d %H:%M:%S", "%d-%m-%Y"):
+        try:
+            return datetime.strptime(value, fmt).strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+    raise ValueError(f"{name} harus berformat YYYY-MM-DD atau DD-MM-YYYY")
+
+
+def _shape_get_jv_rows(rows):
+    shaped = []
+    for row in rows:
+        no_cek = str(row.get("descr") or row.get("jvnumber") or "").strip()
+        debet = row.get("debet") or 0
+        kredit = row.get("kredit") or 0
+        shaped.append({
+            "jv_id": row.get("jv_id"),
+            "tanggal": row.get("transdate"),
+            "no_cek": no_cek,
+            "no_jurnal_umum": str(row.get("jvnumber") or "").strip(),
+            "trans_type": str(row.get("transtype") or "").strip(),
+            "gl_account": str(row.get("glaccount") or "").strip(),
+            "account_name": str(row.get("accountname") or "").strip(),
+            "deskripsi": str(row.get("description") or "").strip(),
+            "jv_amount": row.get("jvamount"),
+            "debet": debet,
+            "kredit": kredit,
+            "jumlah": float(debet or 0) - float(kredit or 0),
+            "rate": row.get("rate"),
+            "prime_amount": row.get("primeamount"),
+            "seq": row.get("seq"),
+            "currency_name": str(row.get("currencyname") or "").strip(),
+            "user_id": row.get("userid"),
+            "username": str(row.get("username") or "").strip(),
+            "dept_id": row.get("deptid"),
+            "project_id": row.get("projectid"),
+            "no": no_cek,
+        })
+    return shaped
+
+
 def _filter_column_rows(rows, reserved):
     filters = {
         key: values
@@ -421,34 +465,77 @@ def _internal_get(app, path, query_params):
     return response.status_code, response.get_json(silent=True) or {}
 
 
-def _fetch_saved_reports(user=""):
+def _fetch_saved_reports(search="", user="", offset=0, limit=50):
     from server import connect_easy_db
+
+    offset = int(offset)
+    limit = int(limit)
+    if offset < 0 or not 1 <= limit <= 1000:
+        raise ValueError("offset minimal 0 dan limit harus antara 1-1000")
 
     con = connect_easy_db()
     try:
         cur = con.cursor()
+        cur.execute("""
+            SELECT TRIM(rf.RDB$FIELD_NAME)
+            FROM RDB$RELATION_FIELDS rf
+            WHERE rf.RDB$RELATION_NAME = 'REPORTFORMAT'
+        """)
+        columns = {str(row[0] or "").strip().upper() for row in cur.fetchall()}
+
+        where = ["report_cat_id = 20", "type = 1"]
         params = []
+        search = str(search or "").strip()
         user = str(user or "").strip()
-        user_filter = ""
         if user:
-            user_filter = "AND (level IS NULL OR level = '' OR UPPER(level) CONTAINING UPPER(?))"
+            where.append("(level IS NULL OR level = '' OR UPPER(level) CONTAINING UPPER(?))")
             params.append(user)
+        search_columns = [
+            column for column in (
+                "REPORT_NAME", "NAME", "DESCRIPTION", "FORMAT_NAME", "TITLE",
+                "REPORT_TITLE",
+            ) if column in columns
+        ]
+        if search and search_columns:
+            where.append("(" + " OR ".join(
+                f"UPPER(CAST({column} AS VARCHAR(255))) CONTAINING UPPER(?)"
+                for column in search_columns
+            ) + ")")
+            params.extend([search] * len(search_columns))
+        where_sql = " AND ".join(where)
+        cur.execute(f"SELECT COUNT(*) FROM REPORTFORMAT WHERE {where_sql}", params)
+        total = int((cur.fetchone() or [0])[0] or 0)
         cur.execute(f"""
-            SELECT *
+            SELECT FIRST ? SKIP ? *
             FROM REPORTFORMAT
-            WHERE report_cat_id = 20 AND type = 1
-              {user_filter}
+            WHERE {where_sql}
             ORDER BY seq, report_id
-        """, params)
-        columns = [desc[0].lower() for desc in cur.description]
-        return [dict(zip(columns, row)) for row in cur.fetchall()]
+        """, [limit, offset] + params)
+        field_names = [desc[0].lower() for desc in cur.description]
+        rows = [dict(zip(field_names, row)) for row in cur.fetchall()]
+        return rows, total
     finally:
         con.close()
 
 
 def _fetch_saved_report(report_id):
-    rows = [row for row in _fetch_saved_reports() if int(row.get("report_id") or 0) == report_id]
-    return rows[0] if rows else None
+    from server import connect_easy_db
+
+    con = connect_easy_db()
+    try:
+        cur = con.cursor()
+        cur.execute("""
+            SELECT *
+            FROM REPORTFORMAT
+            WHERE REPORT_ID = ? AND report_cat_id = 20 AND type = 1
+        """, (report_id,))
+        row = cur.fetchone()
+        if not row:
+            return None
+        columns = [desc[0].lower() for desc in cur.description]
+        return dict(zip(columns, row))
+    finally:
+        con.close()
 
 
 def _fetch_report_fields(report_id):
@@ -538,11 +625,17 @@ def _enrich_report_rows(report, rows):
 
 
 def _effective_report_dates(report):
+    date_from = _normalize_report_date(request.args.get("date_from", ""), "date_from")
+    date_to = _normalize_report_date(request.args.get("date_to", ""), "date_to")
     parameter = str(report.get("parameter") or "").upper()
-    return (
-        request.args.get("date_from", "") or ("1900-01-01" if "PARAMDATE1" in parameter else ""),
-        request.args.get("date_to", "") or ("2099-12-31" if "PARAMDATE2" in parameter else ""),
-    )
+    missing = []
+    if "PARAMDATE1" in parameter and not date_from:
+        missing.append("date_from")
+    if "PARAMDATE2" in parameter and not date_to:
+        missing.append("date_to")
+    if missing:
+        raise InvalidReportParameters(missing)
+    return date_from, date_to
 
 
 def _execute_saved_report(report, date_from="", date_to=""):
@@ -573,10 +666,6 @@ def _execute_saved_report(report, date_from="", date_to=""):
         else:
             name = normalized.split(".")[-1]
             value = _resolve_glaccount_param(report) if name == "glaccount" else request.args.get(name, "")
-        if name == "date_from" and not value:
-            value = "1900-01-01"
-        if name == "date_to" and not value:
-            value = "2099-12-31"
         if value in (None, ""):
             missing.append(name)
         params.append(value)
@@ -594,7 +683,10 @@ def _execute_saved_report(report, date_from="", date_to=""):
         cur = con.cursor()
         cur.execute(sql, params)
         columns = [desc[0].lower() for desc in cur.description]
-        return _enrich_report_rows(report, [dict(zip(columns, row)) for row in cur.fetchall()])
+        rows = [dict(zip(columns, row)) for row in cur.fetchall()]
+        if source.upper() == "GET_JV":
+            rows = _shape_get_jv_rows(rows)
+        return _enrich_report_rows(report, rows)
     finally:
         con.close()
 
@@ -657,9 +749,13 @@ def _gl_accounts_response(offset, limit):
 
 
 def _saved_reports_response(offset, limit):
-    rows = _shape_rows(_fetch_saved_reports(request.args.get("user", "")), "saved-reports")
-    total = len(rows)
-    data = rows[offset:offset + limit]
+    rows, total = _fetch_saved_reports(
+        search=request.args.get("search", ""),
+        user=request.args.get("user", ""),
+        offset=offset,
+        limit=limit,
+    )
+    data = _shape_rows(_json_rows(rows), "saved-reports")
     page = (offset // limit) + 1 if limit else 1
     return {
         "success": True,
@@ -1356,6 +1452,16 @@ def register_integration_api(app):
                     "code": "missing_report_parameters",
                     "message": str(exc),
                     "missing": exc.missing,
+                },
+            }), 400
+        except ValueError as exc:
+            return jsonify({
+                "success": False,
+                "api_version": "v1",
+                "resource": "saved-report-list",
+                "error": {
+                    "code": "invalid_parameters",
+                    "message": str(exc),
                 },
             }), 400
         except Exception:

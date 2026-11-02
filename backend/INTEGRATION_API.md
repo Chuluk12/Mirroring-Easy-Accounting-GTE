@@ -58,6 +58,8 @@ GET /biaya-produksi
 GET /standarisasi-harga
 GET /fifo
 GET /standarisasi-harga/{standar_id}/details
+GET /api/integration/v1/saved-reports
+GET /api/integration/v1/saved-reports/{report_id}/list
 ```
 
 Semua endpoint hanya menerima `GET` dan `OPTIONS`. Respons diberi
@@ -78,6 +80,9 @@ maksimum 500.
 - Biaya Produksi: `search`, `account`, `status`
 - Standarisasi Harga: `search`, `status`, `date_from`, `date_to`
 - FIFO: `search`
+- Saved Reports: `search`, `user`
+- Saved Report rows: `date_from`, `date_to`, `search`, `user`, `columns`,
+  serta parameter report yang didefinisikan pada metadata report
 
 Parameter yang tidak didukung menghasilkan status `400`.
 
@@ -109,6 +114,25 @@ Format respons daftar:
 
 Calculator mengambil halaman berikutnya dengan menambah `offset` sebesar
 `count`, sampai `has_more` bernilai `false`.
+
+Saved Reports mengambil metadata dari `REPORTFORMAT` dengan filter
+`report_cat_id = 20` dan `type = 1`. Detail report mengembalikan definisi field
+dari `MEMORIZEFIELD`. Report yang membutuhkan periode harus menerima
+`date_from` dan `date_to`.
+
+Contoh metadata:
+
+```http
+GET /api/integration/v1/saved-reports?search=petty&limit=50&page=1
+X-API-Key: <API_KEY>
+```
+
+Contoh isi report:
+
+```http
+GET /api/integration/v1/saved-reports/123/list?date_from=2026-01-01&date_to=2026-01-31&limit=100
+X-API-Key: <API_KEY>
+```
 
 ## Status dan error
 
