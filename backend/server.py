@@ -9420,35 +9420,33 @@ def _fetch_material_maps_batch(cur, work_rows):
             FROM STANDARBIAYABRG s
             JOIN STANDARBIAYABRGDET d ON d.NOSTANDARBRG = s.NOSTANDARBRG
             WHERE d.ITEMNO IN ({_build_in_clause(material_nos)})
-              AND COALESCE(d.NEWCOST, 0) > 0
-            ORDER BY d.ITEMNO, s.TGLMULAIBRG DESC, s.TGLSTANDARBRG DESC, s.NOSTANDARBRG DESC
+            ORDER BY d.ITEMNO, s.TGLMULAIBRG DESC
         """, material_nos)
         for material_no, effective_date, standard_date, standard_no, cost in cur.fetchall():
             key = str(material_no or "").strip()
             if key:
                 material_standard_cost_by_item.setdefault(key, []).append({
-                    "effective_date": effective_date or standard_date,
-                    "cost": float(cost or 0),
+                    # Match Easy's GETLASTITEMCOST(TGL): it uses TGLMULAIBRG
+                    # and takes the first matching row, even if NEWCOST is 0.
+                    "effective_date": effective_date,
+                    "cost": float(cost) if cost is not None else None,
                     "standard_no": str(standard_no or "").strip(),
                 })
 
         cur.execute(f"""
-            SELECT ITEMNO, TXDATE, TXTYPE, QUANTITY, COST
+            SELECT ITEMNO, TXDATE, TXTYPE, COST
             FROM ITEMHIST
             WHERE ITEMNO IN ({_build_in_clause(material_nos)})
-              AND COALESCE(COST, 0) > 0
-            ORDER BY ITEMNO, CASE WHEN QUANTITY < 0 THEN 0 ELSE 1 END, TXDATE DESC, ITEMHISTID DESC
+              AND TXTYPE IN ('P', 'C', 'CD', 'AV', 'DIT', 'DOH', 'DPR', 'FIN')
+            ORDER BY ITEMNO, TXDATE DESC, ITEMHISTID DESC
         """, material_nos)
-        for material_no, tx_date, tx_type, quantity, cost in cur.fetchall():
+        for material_no, tx_date, tx_type, cost in cur.fetchall():
             key = str(material_no or "").strip()
             if not key:
                 continue
-            qty = float(quantity or 0)
-            row_cost = float(cost or 0)
-            unit_cost = row_cost / abs(qty) if qty < 0 and qty else row_cost
             material_cost_by_item.setdefault(key, []).append({
                 "tx_date": tx_date,
-                "cost": unit_cost,
+                "cost": float(cost) if cost is not None else None,
             })
 
     for item_no, bom in bom_by_item.items():
@@ -9463,27 +9461,27 @@ def _fetch_material_maps_batch(cur, work_rows):
                 raw_cost = float(material.get("cost") or 0)
                 allocated_cost = raw_cost
                 bom_date = bom.get("updatedate")
-                standard_cost = 0.0
+                standard_cost = None
                 for standard_row in material_standard_cost_by_item.get(material_no, []):
                     effective_date = standard_row.get("effective_date")
-                    if not bom_date or not effective_date or effective_date <= bom_date:
-                        standard_cost = float(standard_row.get("cost") or 0)
+                    if effective_date and (not bom_date or effective_date <= bom_date):
+                        standard_cost = standard_row.get("cost")
                         break
-                fifo_cost = 0.0
+                fifo_cost = None
                 for fifo_row in material_cost_by_item.get(material_no, []):
                     tx_date = fifo_row.get("tx_date")
                     if not bom_date or not tx_date or tx_date <= bom_date:
-                        fifo_cost = float(fifo_row.get("cost") or 0)
+                        fifo_cost = fifo_row.get("cost")
                         break
-                if not allocated_cost and standard_cost:
+                if not allocated_cost and standard_cost is not None:
                     allocated_cost = standard_cost * float(material.get("qty") or 0)
-                elif not allocated_cost and fifo_cost:
+                elif not allocated_cost and fifo_cost is not None:
                     allocated_cost = fifo_cost * float(material.get("qty") or 0)
                 result[wodet_id]["formula_map"][material_no] = {
                     **material,
                     "qty": material["qty"],
                     "cost": allocated_cost,
-                    "cost_estimated": not raw_cost and not standard_cost and not fifo_cost and bool(allocated_cost),
+                    "cost_estimated": not raw_cost and standard_cost is None and fifo_cost is None and bool(allocated_cost),
                 }
             for cost_no, production in formula_production_by_bom.get(bom["bom_id"], {}).items():
                 result[wodet_id]["formula_production_map"][cost_no] = {
