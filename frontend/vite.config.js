@@ -5,7 +5,7 @@ import path from 'path'
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
   const devPort = Number(env.VITE_DEV_PORT || 5175)
-  const previewPort = Number(env.VITE_PREVIEW_PORT || 4173)
+  const previewPort = Number(env.VITE_PREVIEW_PORT || 4175)
 
   return {
     plugins: [react()],
