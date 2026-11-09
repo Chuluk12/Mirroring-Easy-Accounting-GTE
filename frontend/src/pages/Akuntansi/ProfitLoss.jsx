@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
-  Button, Card, Col, DatePicker, Input, message, Row,
+  Button, Card, Col, DatePicker, Input, message, Row, Select,
   Popover, Space, Statistic, Table, Tag, Tooltip, Typography,
 } from 'antd'
 import {
@@ -19,6 +19,10 @@ const { RangePicker } = DatePicker
 const { Search } = Input
 const { Text, Title } = Typography
 const DEFAULT_PAGE_SIZE = 20
+const MONTH_OPTIONS = [
+  'Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni',
+  'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember',
+].map((label, index) => ({ value: index + 1, label }))
 
 const getCurrentMonthRange = () => [dayjs().startOf('month'), dayjs().endOf('month')]
 
@@ -31,16 +35,19 @@ const EXPORT_COLUMNS = [
   { key: 'no_po', label: 'No PO' },
   { key: 'tgl_faktur', label: 'Tgl Faktur', type: 'date' },
   { key: 'no_barang', label: 'No Barang' },
+  { key: 'code_product', label: 'Code Product', permissionKey: 'no_barang' },
   { key: 'deskripsi_barang', label: 'Deskripsi Barang' },
   { key: 'qty', label: 'Qty', type: 'number' },
   { key: 'satuan', label: 'Satuan' },
   { key: 'harga_satuan', label: 'Harga Satuan', type: 'number' },
   { key: 'jumlah', label: 'Jumlah', type: 'number' },
   { key: 'hpp', label: 'HPP', type: 'number' },
+  { key: 'biaya_pengeluaran_spm', label: 'Biaya Pengeluaran SPM', type: 'number' },
   { key: 'laba_rugi', label: 'Laba/Rugi', type: 'number' },
   { key: 'persen', label: '%', type: 'number' },
   { key: 'reff_hpp', label: 'Reff HPP' },
   { key: 'no_spk', label: 'No SPK' },
+  { key: 'no_pengeluaran_spm', label: 'No Pengeluaran Material (SPM)' },
   { key: 'remarks', label: 'Remarks' },
 ]
 
@@ -49,6 +56,8 @@ const emptySummary = {
   total_qty: 0,
   total_jumlah: 0,
   total_hpp: 0,
+  total_biaya_pengeluaran_spm: 0,
+  rows_with_spm: 0,
   laba_rugi: 0,
   margin_pct: 0,
 }
@@ -70,6 +79,8 @@ export default function ProfitLoss() {
   const [search, setSearch] = useState('')
   const [marginFilter, setMarginFilter] = useState('')
   const [dateRange, setDateRange] = useState(getCurrentMonthRange)
+  const [exportYear, setExportYear] = useState(dayjs().year())
+  const [exportMonth, setExportMonth] = useState(dayjs().month() + 1)
   const [pagination, setPagination] = useState({ current: 1, pageSize: DEFAULT_PAGE_SIZE, total: 0 })
 
   const searchRef = useRef('')
@@ -181,6 +192,34 @@ export default function ProfitLoss() {
     auditModule: 'profit_loss',
     auditDescription: 'Export Profit & Loss',
   })
+
+  const handleMonthlyExport = () => {
+    const monthStart = dayjs(`${exportYear}-${String(exportMonth).padStart(2, '0')}-01`).startOf('month')
+    const monthEnd = monthStart.endOf('month')
+    const monthLabel = MONTH_OPTIONS[exportMonth - 1]?.label || monthStart.format('MMMM')
+    return exportRowsToXLS({
+      fetchRows: async () => {
+        const res = await api.get('/api/profit-loss/export', {
+          params: {
+            date_from: monthStart.format('YYYY-MM-DD'),
+            date_to: monthEnd.format('YYYY-MM-DD'),
+          },
+        })
+        return (res.data.data || []).map((row, index) => ({ no: index + 1, ...row }))
+      },
+      columns: [
+        EXPORT_COLUMNS[0],
+        ...filterExportColumnsByPermission('profit_loss', EXPORT_COLUMNS.slice(1), user),
+      ],
+      filename: `ProfitLoss_${exportYear}_${String(exportMonth).padStart(2, '0')}`,
+      sheetName: 'Profit Loss',
+      message,
+      setExporting,
+      loadingText: `Mengambil semua data Profit & Loss bulan ${monthLabel} ${exportYear}...`,
+      auditModule: 'profit_loss',
+      auditDescription: `Export Profit & Loss ${monthLabel} ${exportYear}`,
+    })
+  }
 
   const handleRemarkChange = (rowKey, value) => {
     setData(rows => rows.map(row => (
@@ -318,6 +357,14 @@ export default function ProfitLoss() {
       render: value => <Tooltip title={value}><Text>{value || '-'}</Text></Tooltip>,
     },
     {
+      title: 'Code Product',
+      dataIndex: 'code_product',
+      key: 'code_product',
+      permissionKey: 'no_barang',
+      width: 150,
+      render: value => value || '-',
+    },
+    {
       title: 'Deskripsi Barang',
       dataIndex: 'deskripsi_barang',
       key: 'deskripsi_barang',
@@ -363,6 +410,14 @@ export default function ProfitLoss() {
       width: 150,
       align: 'right',
       render: value => <Text strong style={{ color: '#ff7a00' }}>{formatCurrency(value)}</Text>,
+    },
+    {
+      title: 'Biaya Pengeluaran SPM',
+      dataIndex: 'biaya_pengeluaran_spm',
+      key: 'biaya_pengeluaran_spm',
+      width: 185,
+      align: 'right',
+      render: value => value == null ? '-' : <Tooltip title="Rincian biaya bahan baku SPM yang dialokasikan ke transaksi ini. Sudah termasuk dalam HPP produksi bila HPP aktual tersedia; tidak ditambahkan ulang.">{formatCurrency(value)}</Tooltip>,
     },
     {
       title: 'Laba/Rugi',
@@ -433,6 +488,14 @@ export default function ProfitLoss() {
       render: value => value ? <Tooltip title={value}><Tag color="processing">{value}</Tag></Tooltip> : '-',
     },
     {
+      title: 'No Pengeluaran Material (SPM)',
+      dataIndex: 'no_pengeluaran_spm',
+      key: 'no_pengeluaran_spm',
+      width: 230,
+      ellipsis: { showTitle: false },
+      render: value => value ? <Tooltip title={value}><Text code>{value}</Text></Tooltip> : '-',
+    },
+    {
       title: 'Remarks',
       dataIndex: 'remarks',
       key: 'remarks',
@@ -456,21 +519,26 @@ export default function ProfitLoss() {
     <div style={{ maxWidth: 1440 }}>
       <div style={{ marginBottom: 16 }}>
         <Title level={3} style={{ marginBottom: 4 }}>Profit &amp; Loss</Title>
-        <Text type="secondary">Rincian faktur, DO, SO, nilai jual, dan HPP dari data Easy Accounting.</Text>
+        <Text type="secondary">Biaya SPM tampil sebagai rincian komponen HPP; tidak ditambahkan ulang ke HPP agar tidak terhitung dua kali.</Text>
       </div>
 
       <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
-        <Col xs={24} sm={12} lg={6}>
+        <Col xs={24} sm={12} lg={4}>
           <Card size="small">
             <Statistic title="Jumlah" value={formatCurrency(summary.total_jumlah)} valueStyle={{ color: '#00a92f' }} />
           </Card>
         </Col>
-        <Col xs={24} sm={12} lg={6}>
+        <Col xs={24} sm={12} lg={4}>
           <Card size="small">
             <Statistic title="HPP" value={formatCurrency(summary.total_hpp)} valueStyle={{ color: '#ff7a00' }} />
           </Card>
         </Col>
-        <Col xs={24} sm={12} lg={6}>
+        <Col xs={24} sm={12} lg={4}>
+          <Card size="small">
+            <Statistic title="Biaya SPM (tertaut)" value={formatCurrency(summary.total_biaya_pengeluaran_spm)} suffix={<Text type="secondary">{summary.rows_with_spm}/{summary.total_rows}</Text>} valueStyle={{ color: '#722ed1' }} />
+          </Card>
+        </Col>
+        <Col xs={24} sm={12} lg={4}>
           <Card size="small">
             <Statistic
               title="Laba/Rugi"
@@ -480,7 +548,7 @@ export default function ProfitLoss() {
             />
           </Card>
         </Col>
-        <Col xs={24} sm={12} lg={6}>
+        <Col xs={24} sm={12} lg={4}>
           <Card size="small">
             <Statistic title="Margin" value={summary.margin_pct} precision={2} suffix="%" valueStyle={{ color: isProfit ? '#11b7d8' : '#d41452' }} />
           </Card>
@@ -510,6 +578,32 @@ export default function ProfitLoss() {
                 if (!event.target.value) handleSearch('')
               }}
             />
+            <Select
+              aria-label="Tahun ekspor bulanan"
+              value={exportYear}
+              onChange={setExportYear}
+              style={{ width: 105 }}
+              options={Array.from(
+                { length: Math.max(dayjs().year() - 2023 + 1, 1) },
+                (_, index) => 2023 + index,
+              ).map(year => ({ value: year, label: String(year) }))}
+            />
+            <Select
+              aria-label="Bulan ekspor bulanan"
+              value={exportMonth}
+              onChange={setExportMonth}
+              style={{ width: 125 }}
+              options={MONTH_OPTIONS}
+            />
+            <Button
+              type="primary"
+              icon={<FileExcelOutlined />}
+              onClick={handleMonthlyExport}
+              loading={exporting}
+              style={{ background: '#217346', borderColor: '#217346' }}
+            >
+              Export Per Bulan
+            </Button>
             <Button icon={<ReloadOutlined />} onClick={handleReset}>Reset</Button>
             <Button
               type="primary"

@@ -41,6 +41,7 @@ const StandarisasiHarga = lazy(() => import('./pages/Manufaktur/StandarisasiHarg
 const FIFO = lazy(() => import('./pages/Manufaktur/FIFO'))
 const ProfitLoss = lazy(() => import('./pages/Akuntansi/ProfitLoss'))
 const Aset = lazy(() => import('./pages/Akuntansi/Aset'))
+const AnalisisPembelianMaterial = lazy(() => import('./pages/Akuntansi/AnalisisPembelianMaterial'))
 const Pengembangan = lazy(() => import('./pages/Akuntansi/Pengembangan'))
 
 function PrivateRoute({ children, module }) {
@@ -104,6 +105,7 @@ function AppRoutes() {
           <Route path="akuntansi/hpp" element={<PrivateRoute module="akuntansi"><Pengembangan title="HPP" /></PrivateRoute>} />
           <Route path="akuntansi/profit-loss" element={<PrivateRoute module="akuntansi"><ProfitLoss /></PrivateRoute>} />
           <Route path="akuntansi/aset" element={<PrivateRoute module="akuntansi"><Aset /></PrivateRoute>} />
+          <Route path="akuntansi/analisis-pembelian-material" element={<PrivateRoute module="akuntansi"><AnalisisPembelianMaterial /></PrivateRoute>} />
           <Route path="akuntansi/beban-gaji" element={<PrivateRoute module="akuntansi"><Pengembangan title="Beban" /></PrivateRoute>} />
           <Route path="akuntansi" element={<Navigate to="/akuntansi/profit-loss" replace />} />
         </Route>

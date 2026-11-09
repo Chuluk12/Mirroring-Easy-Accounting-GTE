@@ -228,6 +228,7 @@ export default function MainLayout() {
           },
           { key: '/akuntansi/profit-loss', icon: <CalculatorOutlined />, label: 'Profit & Loss' },
           { key: '/akuntansi/aset', icon: <CalculatorOutlined />, label: 'Aset' },
+          { key: '/akuntansi/analisis-pembelian-material', icon: <CalculatorOutlined />, label: 'Analisis Pembelian Material' },
           {
             key: '/akuntansi/beban-gaji',
             icon: <DollarOutlined />,

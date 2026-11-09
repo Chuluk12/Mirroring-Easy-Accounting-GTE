@@ -407,8 +407,8 @@ MODULE_COLUMNS = {
     ],
     "profit_loss": [
         "customer", "no_faktur", "no_do", "no_so", "no_po", "tgl_faktur",
-        "no_barang", "deskripsi_barang", "qty", "satuan", "harga_satuan", "jumlah", "hpp", "laba_rugi",
-        "persen", "reff_hpp", "no_spk", "remarks", "fifo_details",
+        "no_barang", "code_product", "deskripsi_barang", "qty", "satuan", "harga_satuan", "jumlah", "hpp", "biaya_pengeluaran_spm", "laba_rugi",
+        "persen", "reff_hpp", "no_spk", "no_pengeluaran_spm", "remarks", "fifo_details",
     ],
     "aset": [
         "no_aktiva", "nama_aktiva", "tanggal_aktiva", "nilai_aktiva",
@@ -504,7 +504,7 @@ MODULE_REQUIRED_RESPONSE_KEYS = {
     "spm": ["no_pengeluaran", "no_barang"],
     "gp": ["no_hasil", "no_barang"],
     "hpp": ["no_barang", "sales_details"],
-    "profit_loss": ["row_key", "customer", "no_faktur", "no_do", "no_so", "no_po", "no_barang", "deskripsi_barang", "fifo_details"],
+    "profit_loss": ["row_key", "customer", "no_faktur", "no_do", "no_so", "no_po", "no_barang", "code_product", "deskripsi_barang", "no_pengeluaran_spm", "fifo_details"],
     "aset": ["no_aktiva"],
     "aset_bangunan": ["tanggal", "no_project", "nilai"],
     "beban_gaji": ["tanggal", "nilai"],
@@ -12514,7 +12514,9 @@ _PROFIT_LOSS_SELECT = """
     det.ITEMHISTID,
     h.TXDATE,
     pd.NAME,
-    COALESCE(NULLIF(TRIM(det.ITEMOVDESC), ''), i.ITEMDESCRIPTION)
+    COALESCE(NULLIF(TRIM(det.ITEMOVDESC), ''), i.ITEMDESCRIPTION),
+    det.SOID,
+    det.SOSEQ
 """
 
 
@@ -12730,11 +12732,123 @@ def _build_fifo_hpp_detail_map(cur, fifo_rows):
     return summary
 
 
-def _build_profit_loss_rows(rows, hpp_unit_by_item=None, production_ref_by_item=None, remarks_by_key=None, fifo_detail_by_itemhist=None):
+def _build_profit_loss_spm_cost_map(cur, rows):
+    """Allocate actual SPM material issue costs to linked sales invoice lines.
+
+    SPM expense is exposed as an HPP component. The existing finished-goods
+    ITEMHIST HPP can already include this cost, so callers must not add it to
+    HPP a second time.
+    """
+    sales = []
+    order_item_pairs = set()
+    for row in rows:
+        so_id = row[17] if len(row) > 17 else None
+        item_no = str(row[5] or "").strip()
+        if not so_id or not item_no:
+            continue
+        try:
+            so_id = int(so_id)
+        except (TypeError, ValueError):
+            continue
+        row_key = "|".join([
+            str(row[0] or "").strip(), str(row[1] or "").strip(),
+            str(row[12] or "").strip(), str(row[13] or "").strip(), item_no,
+        ])
+        so_seq = row[18] if len(row) > 18 else None
+        try:
+            so_seq = int(so_seq) if so_seq is not None else None
+        except (TypeError, ValueError):
+            so_seq = None
+        sales.append({
+            "row_key": row_key,
+            "so_id": so_id,
+            "so_seq": so_seq,
+            "item_no": item_no,
+            "date": row[4],
+            "qty": abs(float(row[6] or 0)),
+        })
+        order_item_pairs.add((so_id, item_no))
+    if not sales:
+        return {}
+
+    jobs_by_pair = {}
+    pairs = sorted(order_item_pairs)
+    for start in range(0, len(pairs), 150):
+        chunk = pairs[start:start + 150]
+        pair_where = " OR ".join("(w.SOID = ? AND w.ITEMNO = ?)" for _ in chunk)
+        pair_params = [value for pair in chunk for value in pair]
+        cur.execute(f"""
+            SELECT w.ID, w.SOID, w.SOSEQ, w.ITEMNO, COALESCE(w.QUANTITY, 0)
+            FROM WODET w
+            WHERE {pair_where}
+        """, pair_params)
+        for wodet_id, so_id, so_seq, item_no, planned_qty in cur.fetchall():
+            pair = (int(so_id or 0), str(item_no or "").strip())
+            jobs_by_pair.setdefault(pair, []).append({
+                "id": int(wodet_id or 0),
+                "so_seq": int(so_seq) if so_seq is not None else None,
+                "qty": float(planned_qty or 0),
+            })
+
+    matched_jobs_by_sale = {}
+    job_ids = set()
+    for sale in sales:
+        jobs = jobs_by_pair.get((sale["so_id"], sale["item_no"]), [])
+        exact = [job for job in jobs if sale["so_seq"] is not None and job["so_seq"] == sale["so_seq"]]
+        matches = exact or [job for job in jobs if job["so_seq"] is None]
+        if not matches:
+            continue
+        matched_jobs_by_sale[sale["row_key"]] = matches
+        job_ids.update(job["id"] for job in matches if job["id"])
+    if not job_ids:
+        return {}
+
+    release_costs = {}
+    sorted_job_ids = sorted(job_ids)
+    for start in range(0, len(sorted_job_ids), 300):
+        chunk = sorted_job_ids[start:start + 300]
+        cur.execute(f"""
+            SELECT md.WODETID, m.RELEASEDATE, m.RELEASENO,
+                   SUM(ABS(COALESCE(h.COST, 0)))
+            FROM MATRLSDET md
+            JOIN MATRLS m ON m.ID = md.MATRLSID
+            LEFT JOIN ITEMHIST h ON h.ITEMHISTID = md.ITEMHISTID
+            WHERE md.WODETID IN ({_build_in_clause(chunk)})
+            GROUP BY md.WODETID, m.RELEASEDATE, m.RELEASENO
+            ORDER BY md.WODETID, m.RELEASEDATE, m.RELEASENO
+        """, chunk)
+        for wodet_id, release_date, release_no, cost in cur.fetchall():
+            release_costs.setdefault(int(wodet_id or 0), []).append((release_date, str(release_no or "").strip(), float(cost or 0)))
+
+    result = {}
+    for sale in sales:
+        jobs = matched_jobs_by_sale.get(sale["row_key"])
+        if not jobs:
+            continue
+        planned_qty = sum(job["qty"] for job in jobs)
+        release_total = 0.0
+        release_numbers = []
+        for job in jobs:
+            for release_date, release_no, cost in release_costs.get(job["id"], []):
+                if sale["date"] and release_date and release_date > sale["date"]:
+                    continue
+                release_total += cost
+                if release_no and release_no not in release_numbers:
+                    release_numbers.append(release_no)
+        allocated = release_total * sale["qty"] / planned_qty if planned_qty else 0.0
+        result[sale["row_key"]] = {
+            "cost": round(allocated, 2),
+            "release_numbers": release_numbers,
+        }
+    return result
+
+
+def _build_profit_loss_rows(rows, hpp_unit_by_item=None, production_ref_by_item=None, remarks_by_key=None, fifo_detail_by_itemhist=None, spm_cost_by_row_key=None):
     hpp_unit_by_item = hpp_unit_by_item or {}
     production_ref_by_item = production_ref_by_item or {}
     remarks_by_key = remarks_by_key or {}
     fifo_detail_by_itemhist = fifo_detail_by_itemhist or {}
+    spm_cost_by_row_key = spm_cost_by_row_key or {}
     data = []
     for row in rows:
         item_no = str(row[5] or "").strip()
@@ -12752,6 +12866,7 @@ def _build_profit_loss_rows(rows, hpp_unit_by_item=None, production_ref_by_item=
             itemhist_id,
             item_no,
         ])
+        spm_info = spm_cost_by_row_key.get(row_key) or {}
         jumlah = qty * harga_satuan * (1 - disc_pct / 100)
         if hist_cost and hist_qty and abs(hist_qty - abs(qty)) > 0.0001:
             hpp = hist_cost * (abs(qty) / hist_qty)
@@ -12777,12 +12892,15 @@ def _build_profit_loss_rows(rows, hpp_unit_by_item=None, production_ref_by_item=
             "no_po": str(row[3] or "").strip(),
             "tgl_faktur": str(row[4]) if row[4] else "",
             "no_barang": item_no,
+            "code_product": str(row[19] or "").strip() if len(row) > 19 else "",
             "deskripsi_barang": str(row[16] or "").strip(),
             "qty": round(qty, 4),
             "satuan": str(row[7] or "").strip(),
             "harga_satuan": round(harga_satuan, 2),
             "jumlah": round(jumlah, 2),
             "hpp": round(hpp, 2),
+            "biaya_pengeluaran_spm": spm_info.get("cost"),
+            "no_pengeluaran_spm": ", ".join(spm_info.get("release_numbers") or []),
             "laba_rugi": round(laba_rugi, 2),
             "persen": round(persen, 2),
             "reff_hpp": reff_hpp,
@@ -12802,6 +12920,8 @@ def _profit_loss_summary(rows):
         "total_qty": round(sum(float(row.get("qty") or 0) for row in rows), 4),
         "total_jumlah": total_jumlah,
         "total_hpp": total_hpp,
+        "total_biaya_pengeluaran_spm": round(sum(float(row.get("biaya_pengeluaran_spm") or 0) for row in rows), 2),
+        "rows_with_spm": sum(1 for row in rows if row.get("biaya_pengeluaran_spm") is not None),
         "laba_rugi": laba_rugi,
         "margin_pct": round((laba_rugi / total_jumlah * 100) if total_jumlah else 0, 2),
     }
@@ -12828,6 +12948,7 @@ def _fetch_profit_loss_rows(cur, search="", date_from="", date_to="", offset=0, 
     cur.execute(f"""
         SELECT {paging_sql}
             {_PROFIT_LOSS_SELECT}
+            , {_stock_code_product_expr(cur)}
             {_PROFIT_LOSS_FROM}
         WHERE {where_sql}
         ORDER BY inv.INVOICEDATE DESC, inv.INVOICENO, do1.INVOICENO, det.SEQ
@@ -12844,10 +12965,107 @@ def _fetch_profit_loss_rows(cur, search="", date_from="", date_to="", offset=0, 
         for row in raw_rows
         if row[13] and row[11]
     ])
-    preview_rows = _build_profit_loss_rows(raw_rows, hpp_unit_by_item, production_ref_by_item, {}, fifo_detail_by_itemhist)
+    spm_cost_by_row_key = _build_profit_loss_spm_cost_map(cur, raw_rows)
+    preview_rows = _build_profit_loss_rows(raw_rows, hpp_unit_by_item, production_ref_by_item, {}, fifo_detail_by_itemhist, spm_cost_by_row_key)
     remarks_by_key = _get_profit_loss_remarks([row["row_key"] for row in preview_rows])
-    rows = _build_profit_loss_rows(raw_rows, hpp_unit_by_item, production_ref_by_item, remarks_by_key, fifo_detail_by_itemhist)
+    rows = _build_profit_loss_rows(raw_rows, hpp_unit_by_item, production_ref_by_item, remarks_by_key, fifo_detail_by_itemhist, spm_cost_by_row_key)
     return _filter_profit_loss_margin(rows, margin_filter)
+
+
+@app.route("/api/analisis-pembelian-material")
+@jwt_required()
+def api_analisis_pembelian_material():
+    if not check_permission("akuntansi"):
+        return jsonify({"message": "Akses ditolak"}), 403
+    con = None
+    try:
+        search = request.args.get("search", "").strip()
+        date_from = request.args.get("date_from", "").strip()
+        date_to = request.args.get("date_to", "").strip()
+        offset = max(int(request.args.get("offset", 0)), 0)
+        limit = min(max(int(request.args.get("limit", 20)), 1), 100)
+        if not date_from or not date_to:
+            return jsonify({"message": "Periode tanggal wajib dipilih"}), 400
+
+        con = fdb.connect(**DB_CONFIG)
+        cur = con.cursor()
+        conditions = ["det.ITEMNO IS NOT NULL", "ai.INVOICEDATE >= ?", "ai.INVOICEDATE < DATEADD(1 DAY TO CAST(? AS DATE))"]
+        params = [date_from, date_to]
+        if search:
+            conditions.append("""(
+                ai.INVOICENO CONTAINING ? OR ai.NOFORM CONTAINING ?
+                OR pd.PERSONNO CONTAINING ? OR pd.NAME CONTAINING ?
+                OR det.ITEMNO CONTAINING ? OR det.ITEMOVDESC CONTAINING ?
+                OR i.ITEMDESCRIPTION CONTAINING ?
+            )""")
+            params.extend([search] * 7)
+        where_sql = " AND ".join(conditions)
+        cur.execute(f"""
+            SELECT COUNT(*)
+            FROM APINV ai
+            JOIN APITMDET det ON det.APINVOICEID = ai.APINVOICEID
+            LEFT JOIN PERSONDATA pd ON pd.ID = ai.VENDORID
+            LEFT JOIN ITEM i ON i.ITEMNO = det.ITEMNO
+            WHERE {where_sql}
+        """, params)
+        total_rows = int(cur.fetchone()[0] or 0)
+        cur.execute(f"""
+            SELECT FIRST ? SKIP ?
+                ai.INVOICENO, ai.NOFORM, ai.INVOICEDATE,
+                pd.PERSONNO, pd.NAME, ai.DESCRIPTION,
+                det.ITEMNO, COALESCE(NULLIF(TRIM(det.ITEMOVDESC), ''), i.ITEMDESCRIPTION),
+                det.QUANTITY, det.ITEMUNIT, det.UNITPRICE,
+                CAST(det.ITEMDISCPC AS VARCHAR(50)),
+                det.SEQ
+            FROM APINV ai
+            JOIN APITMDET det ON det.APINVOICEID = ai.APINVOICEID
+            LEFT JOIN PERSONDATA pd ON pd.ID = ai.VENDORID
+            LEFT JOIN ITEM i ON i.ITEMNO = det.ITEMNO
+            WHERE {where_sql}
+            ORDER BY ai.INVOICEDATE DESC, ai.INVOICENO DESC, det.SEQ
+        """, [limit, offset, *params])
+        rows = []
+        for row in cur.fetchall():
+            quantity = float(row[8] or 0)
+            unit_price = float(row[10] or 0)
+            raw_discount = str(row[11] or "").strip()
+            discount = 0.0
+            discount_status = "OK"
+            try:
+                if raw_discount:
+                    discount = float(raw_discount.replace(",", "."))
+            except (TypeError, ValueError):
+                discount = None
+                discount_status = "Perlu cek nilai diskon"
+            rows.append({
+                "no_pembelian": str(row[0] or "").strip(),
+                "no_formulir": str(row[1] or "").strip(),
+                "tanggal": str(row[2])[:10] if row[2] else "",
+                "no_pemasok": str(row[3] or "").strip(),
+                "nama_pemasok": str(row[4] or "").strip(),
+                "deskripsi_transaksi": str(row[5] or "").strip(),
+                "no_material": str(row[6] or "").strip(),
+                "nama_material": str(row[7] or "").strip(),
+                "qty": quantity,
+                "unit": str(row[9] or "").strip(),
+                "harga_satuan": unit_price,
+                "diskon_persen": discount,
+                "diskon_asli": raw_discount,
+                "status_perhitungan": discount_status,
+                "total": quantity * unit_price * (1 - discount / 100) if discount is not None else None,
+            })
+        return jsonify({
+            "data": rows, "total": total_rows,
+            "offset": offset, "limit": limit,
+        })
+    except (TypeError, ValueError):
+        return jsonify({"message": "Offset, limit, atau parameter tanggal tidak valid"}), 400
+    except Exception as exc:
+        app.logger.exception("Analisis pembelian material gagal: %s", exc)
+        return jsonify({"message": "Gagal memuat analisis pembelian material"}), 500
+    finally:
+        if con is not None:
+            con.close()
 
 
 @app.route("/api/profit-loss")
