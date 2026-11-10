@@ -42,6 +42,8 @@ const EXPORT_COLUMNS = [
   { key: 'harga_satuan', label: 'Harga Satuan', type: 'number' },
   { key: 'jumlah', label: 'Jumlah', type: 'number' },
   { key: 'hpp', label: 'HPP', type: 'number' },
+  { key: 'biaya_formula', label: 'Biaya Formula (Estimasi)', type: 'number' },
+  { key: 'no_formula', label: 'No Formula' },
   { key: 'biaya_pengeluaran_spm', label: 'Biaya Pengeluaran SPM', type: 'number' },
   { key: 'laba_rugi', label: 'Laba/Rugi', type: 'number' },
   { key: 'persen', label: '%', type: 'number' },
@@ -56,6 +58,8 @@ const emptySummary = {
   total_qty: 0,
   total_jumlah: 0,
   total_hpp: 0,
+  total_biaya_formula: 0,
+  rows_with_formula: 0,
   total_biaya_pengeluaran_spm: 0,
   rows_with_spm: 0,
   laba_rugi: 0,
@@ -412,6 +416,18 @@ export default function ProfitLoss() {
       render: value => <Text strong style={{ color: '#ff7a00' }}>{formatCurrency(value)}</Text>,
     },
     {
+      title: 'Biaya Formula (Estimasi)',
+      dataIndex: 'biaya_formula',
+      key: 'biaya_formula',
+      width: 205,
+      align: 'right',
+      render: (value, record) => value == null ? '-' : (
+        <Tooltip title={`Formula ${record.no_formula || ''}; dihitung dari biaya total BOM aktif dibagi Qty Build, lalu dikalikan Qty penjualan. Tidak mengubah HPP atau Laba/Rugi.`}>
+          {formatCurrency(value)}
+        </Tooltip>
+      ),
+    },
+    {
       title: 'Biaya Pengeluaran SPM',
       dataIndex: 'biaya_pengeluaran_spm',
       key: 'biaya_pengeluaran_spm',
@@ -519,7 +535,7 @@ export default function ProfitLoss() {
     <div style={{ maxWidth: 1440 }}>
       <div style={{ marginBottom: 16 }}>
         <Title level={3} style={{ marginBottom: 4 }}>Profit &amp; Loss</Title>
-        <Text type="secondary">Biaya SPM tampil sebagai rincian komponen HPP; tidak ditambahkan ulang ke HPP agar tidak terhitung dua kali.</Text>
+        <Text type="secondary">Biaya formula adalah estimasi berdasarkan BOM aktif per barang dan Qty Build; tidak mengubah HPP atau Laba/Rugi. Biaya SPM tampil sebagai rincian komponen HPP dan tidak ditambahkan ulang.</Text>
       </div>
 
       <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
@@ -531,6 +547,11 @@ export default function ProfitLoss() {
         <Col xs={24} sm={12} lg={4}>
           <Card size="small">
             <Statistic title="HPP" value={formatCurrency(summary.total_hpp)} valueStyle={{ color: '#ff7a00' }} />
+          </Card>
+        </Col>
+        <Col xs={24} sm={12} lg={4}>
+          <Card size="small">
+            <Statistic title="Biaya Formula (Estimasi)" value={formatCurrency(summary.total_biaya_formula)} suffix={<Text type="secondary">{summary.rows_with_formula}/{summary.total_rows}</Text>} valueStyle={{ color: '#1677ff' }} />
           </Card>
         </Col>
         <Col xs={24} sm={12} lg={4}>
@@ -624,7 +645,7 @@ export default function ProfitLoss() {
           loading={loading}
           size="small"
           sticky
-          scroll={{ x: 2835, y: 'calc(100vh - 360px)' }}
+          scroll={{ x: 3040, y: 'calc(100vh - 360px)' }}
           rowClassName={record => Number(record.laba_rugi || 0) < 0 ? 'profit-loss-row-loss' : ''}
           onChange={handleTableChange}
           pagination={{

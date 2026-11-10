@@ -380,11 +380,12 @@ MODULE_COLUMNS = {
         "sumber_harga",
     ],
     "monitoring_formula": [
-        "wodet_id", "no_spk", "tanggal", "product_code", "no_barang", "nama_barang", "qty_spk",
+        "wodet_id", "no_spk", "tanggal", "product_code", "code_product", "no_barang", "nama_barang", "qty_spk",
         "uom", "spk_note", "no_job", "no_formula", "formula_material_count", "spk_material_count",
         "spm_material_count", "formula_vs_spk_status", "spk_vs_spm_status",
         "material_stock_status", "material_stock_shortage_count",
         "formula_material_cost", "formula_production_cost", "formula_total_cost",
+        "spm_material_cost",
         "spk_material_cost", "spk_production_cost", "spk_total_cost",
         "hpp_total_actual", "hpp_per_unit", "hpp_per_unit_spk", "hpp_status",
         "material_cost_diff", "production_cost_diff", "total_cost_diff",
@@ -407,7 +408,7 @@ MODULE_COLUMNS = {
     ],
     "profit_loss": [
         "customer", "no_faktur", "no_do", "no_so", "no_po", "tgl_faktur",
-        "no_barang", "code_product", "deskripsi_barang", "qty", "satuan", "harga_satuan", "jumlah", "hpp", "biaya_pengeluaran_spm", "laba_rugi",
+        "no_barang", "code_product", "deskripsi_barang", "qty", "satuan", "harga_satuan", "jumlah", "hpp", "biaya_formula", "no_formula", "biaya_pengeluaran_spm", "laba_rugi",
         "persen", "reff_hpp", "no_spk", "no_pengeluaran_spm", "remarks", "fifo_details",
     ],
     "aset": [
@@ -10618,6 +10619,8 @@ def api_monitoring_formula():
                 })
             formula_material_cost = sum(float(item.get("formula_cost_for_spk_qty") or 0) for item in materials)
             formula_material_cost_for_spk_qty = sum(float(item.get("formula_cost_for_spk_qty") or 0) for item in materials)
+            spm_cost_values = [item.get("spm_cost") for item in materials if item.get("spm_cost") is not None]
+            spm_material_cost = sum(float(value or 0) for value in spm_cost_values) if spm_cost_values else None
             spk_material_cost = sum(float(item.get("spk_cost") or 0) for item in materials)
             formula_production_cost = sum(float(item.get("formula_cost_for_spk_qty") or 0) for item in production_details)
             spk_production_cost = sum(float(item.get("spk_cost") or 0) for item in production_details)
@@ -10695,6 +10698,7 @@ def api_monitoring_formula():
                 "formula_material_cost": formula_material_cost,
                 "formula_production_cost": formula_production_cost,
                 "formula_total_cost": formula_total_cost,
+                "spm_material_cost": spm_material_cost,
                 "spk_material_cost": spk_material_cost,
                 "spk_production_cost": spk_production_cost,
                 "spk_total_cost": spk_total_cost,
@@ -11464,7 +11468,8 @@ def api_monitoring_gp():
                 pr.ID, prd.ID, pr.RESULTNO, pr.RESULTDATE, wo.WONO, wo.WODATE,
                 pr.DESCRIPTION, prd.ITEMNO, i.ITEMDESCRIPTION,
                 prd.QUANTITY, prd.UNIT, wd.QUANTITY, prd.WODETID,
-                prd.COST, wd.NOJOB
+                prd.COST, wd.NOJOB,
+                {_stock_code_product_expr(cur)}
             {from_sql}
             WHERE {where_sql}
             ORDER BY pr.RESULTDATE DESC, pr.RESULTNO DESC, prd.ID
@@ -11486,6 +11491,7 @@ def api_monitoring_gp():
                 "uom": str(row[10] or "").strip(),
                 "wodet_id": row[12], "biaya_gp": float(row[13] or 0),
                 "no_job": str(row[14] or "").strip(),
+                "code_product": str(row[15] or "").strip(),
                 "persentase": round(min(qty_gp / qty_spk * 100, 100), 1) if qty_spk > 0 else 0,
             })
         has_more = skip_count and len(data) > limit
@@ -12843,12 +12849,42 @@ def _build_profit_loss_spm_cost_map(cur, rows):
     return result
 
 
-def _build_profit_loss_rows(rows, hpp_unit_by_item=None, production_ref_by_item=None, remarks_by_key=None, fifo_detail_by_itemhist=None, spm_cost_by_row_key=None):
+def _build_profit_loss_formula_cost_map(cur, rows):
+    """Estimate formula cost for sold quantities using the current active BOM."""
+    item_nos = sorted({str(row[5] or "").strip() for row in rows if str(row[5] or "").strip()})
+    if not item_nos:
+        return {}
+
+    result = {}
+    for start in range(0, len(item_nos), 300):
+        chunk = item_nos[start:start + 300]
+        cur.execute(f"""
+            SELECT ITEMNO, MATCOST, DLABORCOST, MOHCOST, EXPENSECOST, QTYBUILD, BOMNO
+            FROM BOM
+            WHERE ITEMNO IN ({_build_in_clause(chunk)})
+            ORDER BY ITEMNO, SUSPENDED, BOMNO
+        """, chunk)
+        for item_no, material_cost, labor_cost, overhead_cost, expense_cost, qty_build, bom_no in cur.fetchall():
+            key = str(item_no or "").strip()
+            if key in result:
+                continue
+            result[key] = {
+                "unit_batch_cost": sum(float(value or 0) for value in (
+                    material_cost, labor_cost, overhead_cost, expense_cost,
+                )),
+                "qty_build": float(qty_build or 1) or 1,
+                "no_formula": str(bom_no or "").strip(),
+            }
+    return result
+
+
+def _build_profit_loss_rows(rows, hpp_unit_by_item=None, production_ref_by_item=None, remarks_by_key=None, fifo_detail_by_itemhist=None, spm_cost_by_row_key=None, formula_cost_by_item=None):
     hpp_unit_by_item = hpp_unit_by_item or {}
     production_ref_by_item = production_ref_by_item or {}
     remarks_by_key = remarks_by_key or {}
     fifo_detail_by_itemhist = fifo_detail_by_itemhist or {}
     spm_cost_by_row_key = spm_cost_by_row_key or {}
+    formula_cost_by_item = formula_cost_by_item or {}
     data = []
     for row in rows:
         item_no = str(row[5] or "").strip()
@@ -12867,6 +12903,11 @@ def _build_profit_loss_rows(rows, hpp_unit_by_item=None, production_ref_by_item=
             item_no,
         ])
         spm_info = spm_cost_by_row_key.get(row_key) or {}
+        formula_info = formula_cost_by_item.get(item_no)
+        biaya_formula = (
+            formula_info["unit_batch_cost"] * abs(qty) / formula_info["qty_build"]
+            if formula_info else None
+        )
         jumlah = qty * harga_satuan * (1 - disc_pct / 100)
         if hist_cost and hist_qty and abs(hist_qty - abs(qty)) > 0.0001:
             hpp = hist_cost * (abs(qty) / hist_qty)
@@ -12899,6 +12940,8 @@ def _build_profit_loss_rows(rows, hpp_unit_by_item=None, production_ref_by_item=
             "harga_satuan": round(harga_satuan, 2),
             "jumlah": round(jumlah, 2),
             "hpp": round(hpp, 2),
+            "biaya_formula": round(biaya_formula, 2) if biaya_formula is not None else None,
+            "no_formula": formula_info.get("no_formula", "") if formula_info else "",
             "biaya_pengeluaran_spm": spm_info.get("cost"),
             "no_pengeluaran_spm": ", ".join(spm_info.get("release_numbers") or []),
             "laba_rugi": round(laba_rugi, 2),
@@ -12920,6 +12963,8 @@ def _profit_loss_summary(rows):
         "total_qty": round(sum(float(row.get("qty") or 0) for row in rows), 4),
         "total_jumlah": total_jumlah,
         "total_hpp": total_hpp,
+        "total_biaya_formula": round(sum(float(row.get("biaya_formula") or 0) for row in rows), 2),
+        "rows_with_formula": sum(1 for row in rows if row.get("biaya_formula") is not None),
         "total_biaya_pengeluaran_spm": round(sum(float(row.get("biaya_pengeluaran_spm") or 0) for row in rows), 2),
         "rows_with_spm": sum(1 for row in rows if row.get("biaya_pengeluaran_spm") is not None),
         "laba_rugi": laba_rugi,
@@ -12954,6 +12999,7 @@ def _fetch_profit_loss_rows(cur, search="", date_from="", date_to="", offset=0, 
         ORDER BY inv.INVOICEDATE DESC, inv.INVOICENO, do1.INVOICENO, det.SEQ
     """, paging_params + params)
     raw_rows = cur.fetchall()
+    formula_cost_by_item = _build_profit_loss_formula_cost_map(cur, raw_rows)
     production_ref_by_item = _build_hpp_production_ref_map(cur, [row[5] for row in raw_rows], date_to)
     fifo_detail_by_itemhist = _build_fifo_hpp_detail_map(cur, [
         {
@@ -12966,9 +13012,9 @@ def _fetch_profit_loss_rows(cur, search="", date_from="", date_to="", offset=0, 
         if row[13] and row[11]
     ])
     spm_cost_by_row_key = _build_profit_loss_spm_cost_map(cur, raw_rows)
-    preview_rows = _build_profit_loss_rows(raw_rows, hpp_unit_by_item, production_ref_by_item, {}, fifo_detail_by_itemhist, spm_cost_by_row_key)
+    preview_rows = _build_profit_loss_rows(raw_rows, hpp_unit_by_item, production_ref_by_item, {}, fifo_detail_by_itemhist, spm_cost_by_row_key, formula_cost_by_item)
     remarks_by_key = _get_profit_loss_remarks([row["row_key"] for row in preview_rows])
-    rows = _build_profit_loss_rows(raw_rows, hpp_unit_by_item, production_ref_by_item, remarks_by_key, fifo_detail_by_itemhist, spm_cost_by_row_key)
+    rows = _build_profit_loss_rows(raw_rows, hpp_unit_by_item, production_ref_by_item, remarks_by_key, fifo_detail_by_itemhist, spm_cost_by_row_key, formula_cost_by_item)
     return _filter_profit_loss_margin(rows, margin_filter)
 
 

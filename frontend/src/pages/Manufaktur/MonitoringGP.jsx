@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Button, Card, DatePicker, Input, Space, Table, Tag, Tooltip, Typography, message } from 'antd'
+import { Button, Card, DatePicker, Input, Select, Space, Table, Tag, Tooltip, Typography, message } from 'antd'
 import { FileExcelOutlined, ReloadOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import api, { getApiErrorMessage } from '../../api/client'
@@ -9,6 +9,10 @@ import { withTableSorters } from '../../utils/tableSorters'
 const { RangePicker } = DatePicker
 const { Text } = Typography
 const monthRange = () => [dayjs().startOf('month'), dayjs().endOf('month')]
+const MONTH_OPTIONS = [
+  'Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni',
+  'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember',
+].map((label, index) => ({ value: index + 1, label }))
 const formatQty = value => Number(value || 0).toLocaleString('id-ID', { maximumFractionDigits: 4 })
 const formatMoney = value => Number(value || 0).toLocaleString('id-ID', { style: 'currency', currency: 'IDR', maximumFractionDigits: 4 })
 const optionalQty = value => value === null || value === undefined ? '-' : formatQty(value)
@@ -71,6 +75,7 @@ const exportColumns = [
   { key: 'tgl_spk', label: 'Tanggal SPK', type: 'date' },
   { key: 'no_job', label: 'No JOB' },
   { key: 'no_barang', label: 'No Barang' },
+  { key: 'code_product', label: 'Code Product' },
   { key: 'nama_barang', label: 'Deskripsi Barang' },
   { key: 'qty_gp', label: 'Qty GP', type: 'number' },
   { key: 'qty_spk', label: 'Qty SPK', type: 'number' },
@@ -82,14 +87,15 @@ const exportColumns = [
   { key: 'spm_material_count', label: 'Material SPM', type: 'number' },
   { key: 'formula_material_cost', label: 'Biaya Material Formula', type: 'accounting' },
   { key: 'formula_production_cost', label: 'Biaya Produksi Formula', type: 'accounting' },
-  { key: 'formula_total_cost', label: 'Total Formula', type: 'accounting' },
+  { key: 'formula_total_cost', label: 'Total Biaya Formula (Qty GP)', type: 'accounting' },
+  { key: 'spm_material_cost', label: 'Biaya SPM (Qty GP)', type: 'accounting' },
   { key: 'spk_material_cost', label: 'Biaya Material SPK', type: 'accounting' },
   { key: 'spk_production_cost', label: 'Biaya Produksi SPK', type: 'accounting' },
   { key: 'spk_total_cost', label: 'Total SPK', type: 'accounting' },
   { key: 'total_cost_diff', label: 'Selisih Biaya', type: 'accounting' },
 ]
 
-const gpReferenceColumns = exportColumns.slice(0, 12)
+const gpReferenceColumns = exportColumns.slice(0, 13)
 const materialExportColumns = [
   ...gpReferenceColumns,
   { key: 'no_spm', label: 'No SPM' },
@@ -137,6 +143,24 @@ const wipExportColumns = [
   { key: 'source', label: 'Sumber' },
 ]
 
+function addFormulaSummaryToGp(gp, formula) {
+  if (!formula) return gp
+  const summary = Object.fromEntries(exportColumns
+    .filter(column => column.key in formula)
+    .map(column => [column.key, formula[column.key]]))
+  const spkQty = Number(gp.qty_spk || 0)
+  const gpQty = Number(gp.qty_gp || 0)
+  const ratio = spkQty > 0 ? gpQty / spkQty : 0
+  return {
+    ...gp,
+    ...summary,
+    // Monitoring GP is per hasil produksi. Formula/SPM summaries are per SPK,
+    // so allocate those totals to this GP by its share of the SPK quantity.
+    formula_total_cost: formula.formula_total_cost == null ? null : Number(formula.formula_total_cost) * ratio,
+    spm_material_cost: formula.spm_material_cost == null ? null : Number(formula.spm_material_cost) * ratio,
+  }
+}
+
 async function addFormulaSummaries(gpRows) {
   const ids = [...new Set(gpRows.map(row => row.wodet_id).filter(Boolean))]
   if (!ids.length) return gpRows
@@ -145,20 +169,15 @@ async function addFormulaSummaries(gpRows) {
     timeout: 90000,
   })
   const byId = new Map((response.data.data || []).map(row => [Number(row.wodet_id), row]))
-  return gpRows.map(row => {
-    const formula = byId.get(Number(row.wodet_id))
-    if (!formula) return row
-    const summary = Object.fromEntries(exportColumns
-      .filter(column => column.key in formula)
-      .map(column => [column.key, formula[column.key]]))
-    return { ...row, ...summary }
-  })
+  return gpRows.map(row => addFormulaSummaryToGp(row, byId.get(Number(row.wodet_id))))
 }
 
 export default function MonitoringGP() {
   const [dates, setDates] = useState(monthRange)
   const [search, setSearch] = useState('')
   const [filters, setFilters] = useState({ dates: monthRange(), search: '' })
+  const [exportYear, setExportYear] = useState(dayjs().year())
+  const [exportMonth, setExportMonth] = useState(dayjs().month() + 1)
   const [rows, setRows] = useState([])
   const [pagination, setPagination] = useState({ current: 1, pageSize: 20, total: 0 })
   const [loading, setLoading] = useState(false)
@@ -207,11 +226,11 @@ export default function MonitoringGP() {
     }
   }
 
-  const exportAll = async () => {
+  const exportAll = async ({ dateRange = dates, searchValue = search } = {}) => {
     setExporting(true)
     message.loading({ content: 'Menyiapkan export Monitoring GP...', key: 'monitoring-gp-export', duration: 0 })
     try {
-      const exportFilters = { dates, search }
+      const exportFilters = { dates: dateRange, search: searchValue }
       if (!exportFilters.dates?.[0] || !exportFilters.dates?.[1]) {
         message.warning({ content: 'Pilih tanggal awal dan akhir untuk export', key: 'monitoring-gp-export' })
         return
@@ -245,10 +264,7 @@ export default function MonitoringGP() {
         }
         for (const gp of page) {
           const formula = formulaById.get(Number(gp.wodet_id))
-          const summary = formula ? Object.fromEntries(exportColumns
-            .filter(column => column.key in formula)
-            .map(column => [column.key, formula[column.key]])) : {}
-          const gpRow = { ...gp, ...summary }
+          const gpRow = addFormulaSummaryToGp(gp, formula)
           allRows.push(gpRow)
           if (!formula) continue
           const parent = Object.fromEntries(gpReferenceColumns.map(column => [column.key, gpRow[column.key]]))
@@ -283,6 +299,11 @@ export default function MonitoringGP() {
     }
   }
 
+  const exportMonthData = () => {
+    const monthStart = dayjs(`${exportYear}-${String(exportMonth).padStart(2, '0')}-01`).startOf('month')
+    return exportAll({ dateRange: [monthStart, monthStart.endOf('month')], searchValue: '' })
+  }
+
   const columns = [
     { title: 'No GP', dataIndex: 'no_gp', width: 160, fixed: 'left' },
     { title: 'Tanggal GP', dataIndex: 'tgl_gp', width: 120, render: value => value ? dayjs(value).format('DD/MM/YYYY') : '-' },
@@ -290,6 +311,7 @@ export default function MonitoringGP() {
     { title: 'Tanggal SPK', dataIndex: 'tgl_spk', width: 120, render: value => value ? dayjs(value).format('DD/MM/YYYY') : '-' },
     { title: 'No JOB', dataIndex: 'no_job', width: 160, render: value => value ? <Text code>{value}</Text> : '-' },
     { title: 'No Barang', dataIndex: 'no_barang', width: 180 },
+    { title: 'Code Product', dataIndex: 'code_product', width: 140, render: value => value || '-' },
     { title: 'Deskripsi Barang', dataIndex: 'nama_barang', width: 280, ellipsis: true },
     { title: 'Qty GP', dataIndex: 'qty_gp', width: 120, align: 'right', render: formatQty },
     { title: 'Qty SPK', dataIndex: 'qty_spk', width: 120, align: 'right', render: formatQty },
@@ -301,7 +323,8 @@ export default function MonitoringGP() {
     { title: 'Material SPM', dataIndex: 'spm_material_count', width: 115, align: 'right', render: value => value == null ? '-' : <Tag color="blue">{value}</Tag> },
     { title: 'Biaya Material Formula', dataIndex: 'formula_material_cost', width: 175, align: 'right', render: optionalMoney },
     { title: 'Biaya Produksi Formula', dataIndex: 'formula_production_cost', width: 175, align: 'right', render: optionalMoney },
-    { title: 'Total Formula', dataIndex: 'formula_total_cost', width: 155, align: 'right', render: optionalMoney },
+    { title: 'Total Biaya Formula (Qty GP)', dataIndex: 'formula_total_cost', width: 205, align: 'right', render: optionalMoney },
+    { title: 'Biaya SPM (Qty GP)', dataIndex: 'spm_material_cost', width: 180, align: 'right', render: optionalMoney },
     { title: 'Biaya Material SPK', dataIndex: 'spk_material_cost', width: 165, align: 'right', render: optionalMoney },
     { title: 'Biaya Produksi SPK', dataIndex: 'spk_production_cost', width: 165, align: 'right', render: optionalMoney },
     { title: 'Total SPK', dataIndex: 'spk_total_cost', width: 150, align: 'right', render: optionalMoney },
@@ -342,11 +365,27 @@ export default function MonitoringGP() {
     <RangePicker value={dates} format="DD/MM/YYYY" onChange={setDates} />
     <Input.Search placeholder="Cari GP, SPK, barang..." allowClear value={search} onChange={event => setSearch(event.target.value)} onSearch={value => setFilters({ dates, search: value })} style={{ width: 250 }} />
     <Button onClick={() => setFilters({ dates, search })}>Cari</Button>
+    <Select
+      aria-label="Tahun ekspor bulanan Monitoring GP"
+      value={exportYear}
+      onChange={setExportYear}
+      style={{ width: 100 }}
+      options={Array.from({ length: Math.max(dayjs().year() - 2023 + 1, 1) }, (_, index) => 2023 + index)
+        .map(year => ({ value: year, label: String(year) }))}
+    />
+    <Select
+      aria-label="Bulan ekspor bulanan Monitoring GP"
+      value={exportMonth}
+      onChange={setExportMonth}
+      style={{ width: 120 }}
+      options={MONTH_OPTIONS}
+    />
+    <Button icon={<FileExcelOutlined />} loading={exporting} onClick={exportMonthData}>Export Per Bulan</Button>
     <Button icon={<ReloadOutlined />} onClick={() => { const current = monthRange(); setDates(current); setSearch(''); setFilters({ dates: current, search: '' }) }}>Reset</Button>
     <Button icon={<FileExcelOutlined />} loading={exporting} onClick={exportAll}>Export XLS</Button>
   </Space>}>
     <Text type="secondary">Filter tanggal berdasarkan tanggal hasil produksi (GP). Buka baris untuk melihat rincian SPK terkait.</Text>
-    <Table style={{ marginTop: 12 }} rowKey="gp_detail_id" loading={loading} columns={withTableSorters(columns)} dataSource={rows} size="small" scroll={{ x: 3400 }} expandable={{ expandedRowRender, onExpand: (expanded, record) => { if (expanded) loadDetail(record) } }} pagination={{ ...pagination, showSizeChanger: true, pageSizeOptions: ['20', '50', '100'], onChange: (page, size) => fetchRows(page, size, filters) }} />
+    <Table style={{ marginTop: 12 }} rowKey="gp_detail_id" loading={loading} columns={withTableSorters(columns)} dataSource={rows} size="small" scroll={{ x: 3900 }} expandable={{ expandedRowRender, onExpand: (expanded, record) => { if (expanded) loadDetail(record) } }} pagination={{ ...pagination, showSizeChanger: true, pageSizeOptions: ['20', '50', '100'], onChange: (page, size) => fetchRows(page, size, filters) }} />
     <style>{`
       .monitoring-gp-cost-summary { width: 100%; border-collapse: separate; border-spacing: 0; border: 1px solid #f0f0f0; border-radius: 6px; background: #fff; }
       .monitoring-gp-cost-summary th, .monitoring-gp-cost-summary td { padding: 8px 12px; border-right: 1px solid #f0f0f0; border-bottom: 1px solid #f0f0f0; text-align: left; white-space: nowrap; }
