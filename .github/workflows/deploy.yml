@@ -122,6 +122,6 @@ jobs:
           timeout: 60s
           command_timeout: 25m
           script: |
-            cd ~/repositories/Mirroring-Easy-Accounting-GTE
+            cd ~/serverweb/services/Mirroring-Easy-Accounting-GTE
             git pull origin main
             docker compose up -d --build
