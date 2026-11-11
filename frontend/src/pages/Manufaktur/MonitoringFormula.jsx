@@ -21,6 +21,10 @@ const { Text } = Typography
 const getCurrentMonthRange = () => [dayjs().startOf('month'), dayjs().endOf('month')]
 const getDefaultDateRange = getCurrentMonthRange
 const DEFAULT_PAGE_SIZE = 10
+const MONTH_OPTIONS = [
+  'Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni',
+  'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember',
+].map((label, index) => ({ value: index + 1, label }))
 
 const STATUS_OPTIONS = [
   { value: '', label: 'Semua Status' },
@@ -266,6 +270,8 @@ export default function MonitoringFormula() {
   const [loadingMsg, setLoadingMsg] = useState('Memuat data formula...')
   const [hasLoaded, setHasLoaded] = useState(false)
   const [exporting, setExporting] = useState(false)
+  const [exportYear, setExportYear] = useState(dayjs().year())
+  const [exportMonth, setExportMonth] = useState(dayjs().month() + 1)
   const [search, setSearch] = useState('')
   const [status, setStatus] = useState('')
   const [product, setProduct] = useState('')
@@ -661,15 +667,15 @@ export default function MonitoringFormula() {
     return { materialRows, productionRows, salesRows }
   }
 
-  const fetchAllExportRows = async (dateFrom, dateTo, label) => {
+  const fetchAllExportRows = async (dateFrom, dateTo, label, includeCurrentFilters = true) => {
     const pageSize = 250
     const exportRows = []
     const filters = {
       date_from: dateFrom,
       date_to: dateTo,
-      ...(searchRef.current ? { search: searchRef.current } : {}),
-      ...(statusRef.current ? { status: statusRef.current } : {}),
-      ...(productRef.current ? { product: productRef.current } : {}),
+      ...(includeCurrentFilters && searchRef.current ? { search: searchRef.current } : {}),
+      ...(includeCurrentFilters && statusRef.current ? { status: statusRef.current } : {}),
+      ...(includeCurrentFilters && productRef.current ? { product: productRef.current } : {}),
     }
     let offset = 0
     let hasMore = true
@@ -740,10 +746,10 @@ export default function MonitoringFormula() {
     setExporting(true)
     message.loading({ content: 'Mengambil seluruh data Monitoring Formula bulan ini...', key: 'export', duration: 0 })
     try {
-      const month = (dateRangeRef.current?.[0] || dayjs()).startOf('month')
+      const month = dayjs(`${exportYear}-${String(exportMonth).padStart(2, '0')}-01`).startOf('month')
       const dateFrom = month.format('YYYY-MM-DD')
       const dateTo = month.endOf('month').format('YYYY-MM-DD')
-      const exportRows = await fetchAllExportRows(dateFrom, dateTo, `bulan ${month.format('MMMM YYYY')}`)
+      const exportRows = await fetchAllExportRows(dateFrom, dateTo, `bulan ${month.format('MMMM YYYY')}`, false)
 
       if (!exportRows.length) {
         message.warning({ content: `Tidak ada data pada ${month.format('MMMM YYYY')}`, key: 'export' })
@@ -1709,6 +1715,7 @@ export default function MonitoringFormula() {
       <Card
         title={<span><PartitionOutlined style={{ marginRight: 8, color: '#1a73e8' }} />Monitoring Formula</span>}
         extra={
+          <Space direction="vertical" align="end" size={8}>
           <Space wrap>
             <RangePicker
               value={dateRange}
@@ -1757,14 +1764,32 @@ export default function MonitoringFormula() {
             >
               Export XLS
             </Button>
+          </Space>
+          <Space.Compact>
+            <Select
+              aria-label="Tahun ekspor bulanan Monitoring Formula"
+              value={exportYear}
+              onChange={setExportYear}
+              style={{ width: 100 }}
+              options={Array.from({ length: Math.max(dayjs().year() - 2023 + 1, 1) }, (_, index) => 2023 + index)
+                .map(year => ({ value: year, label: String(year) }))}
+            />
+            <Select
+              aria-label="Bulan ekspor bulanan Monitoring Formula"
+              value={exportMonth}
+              onChange={setExportMonth}
+              style={{ width: 120 }}
+              options={MONTH_OPTIONS}
+            />
             <Button
               icon={<FileExcelOutlined />}
               onClick={handleExportMonth}
               loading={exporting}
-              title="Mengekspor semua data pada bulan dari tanggal awal yang dipilih, dengan filter aktif"
+              title="Mengekspor seluruh data pada bulan dan tahun yang dipilih, tanpa mengikuti pagination atau filter tabel"
             >
-              Export 1 Bulan
+              Export Bulan
             </Button>
+          </Space.Compact>
           </Space>
         }
       >
