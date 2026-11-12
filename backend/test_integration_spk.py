@@ -9,6 +9,12 @@ import server
 
 
 class SpkIntegrationTest(unittest.TestCase):
+    def test_build_in_clause_casts_long_item_values(self):
+        self.assertEqual(
+            server._build_in_clause(["ITEM-1", "ITEM-2"], "VARCHAR(255)"),
+            "CAST(? AS VARCHAR(255)),CAST(? AS VARCHAR(255))",
+        )
+
     def test_monitoring_formula_filters_finished_item_product(self):
         where_sql, params = server._monitoring_formula_where_clause(
             no_spk="SPK-001", product="Product O'Reilly",

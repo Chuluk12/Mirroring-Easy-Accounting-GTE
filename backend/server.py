@@ -9177,8 +9177,11 @@ def _fetch_material_maps(cur, wodet_id, item_no, qty_spk):
     return no_formula, formula_map, spk_map, spm_map
 
 
-def _build_in_clause(values):
-    return ",".join(["?"] * len(values))
+def _build_in_clause(values, cast_type=None):
+    placeholder = "?"
+    if cast_type:
+        placeholder = f"CAST(? AS {cast_type})"
+    return ",".join([placeholder] * len(values))
 
 
 def _record_spk_material_qty_snapshots(material_maps, include_history=True):
@@ -9309,7 +9312,7 @@ def _fetch_material_maps_batch(cur, work_rows):
         cur.execute(f"""
             SELECT ITEMNO, BOMID, BOMNO, QTYBUILD, MATCOST, DLABORCOST, MOHCOST, EXPENSECOST, UPDATEDATE
             FROM BOM
-            WHERE ITEMNO IN ({_build_in_clause(item_nos)})
+            WHERE ITEMNO IN ({_build_in_clause(item_nos, "VARCHAR(255)")})
             ORDER BY ITEMNO, SUSPENDED, BOMNO
         """, item_nos)
         for item_no, bom_id, bom_no, qty_build, mat_cost, dlabor_cost, moh_cost, expense_cost, update_date in cur.fetchall():
@@ -9420,7 +9423,7 @@ def _fetch_material_maps_batch(cur, work_rows):
             SELECT d.ITEMNO, s.TGLMULAIBRG, s.TGLSTANDARBRG, s.NOSTANDARBRG, d.NEWCOST
             FROM STANDARBIAYABRG s
             JOIN STANDARBIAYABRGDET d ON d.NOSTANDARBRG = s.NOSTANDARBRG
-            WHERE d.ITEMNO IN ({_build_in_clause(material_nos)})
+            WHERE d.ITEMNO IN ({_build_in_clause(material_nos, "VARCHAR(255)")})
             ORDER BY d.ITEMNO, s.TGLMULAIBRG DESC
         """, material_nos)
         for material_no, effective_date, standard_date, standard_no, cost in cur.fetchall():
@@ -9437,7 +9440,7 @@ def _fetch_material_maps_batch(cur, work_rows):
         cur.execute(f"""
             SELECT ITEMNO, TXDATE, TXTYPE, COST
             FROM ITEMHIST
-            WHERE ITEMNO IN ({_build_in_clause(material_nos)})
+            WHERE ITEMNO IN ({_build_in_clause(material_nos, "VARCHAR(255)")})
               AND TXTYPE IN ('P', 'C', 'CD', 'AV', 'DIT', 'DOH', 'DPR', 'FIN')
             ORDER BY ITEMNO, TXDATE DESC, ITEMHISTID DESC
         """, material_nos)
@@ -9563,7 +9566,7 @@ def _fetch_material_maps_batch(cur, work_rows):
                 SELECT d.ITEMNO, s.TGLMULAIBRG, s.TGLSTANDARBRG, s.NOSTANDARBRG, d.NEWCOST
                 FROM STANDARBIAYABRG s
                 JOIN STANDARBIAYABRGDET d ON d.NOSTANDARBRG = s.NOSTANDARBRG
-                WHERE d.ITEMNO IN ({_build_in_clause(spk_material_nos)})
+                WHERE d.ITEMNO IN ({_build_in_clause(spk_material_nos, "VARCHAR(255)")})
                   AND COALESCE(d.NEWCOST, 0) > 0
                 ORDER BY d.ITEMNO, s.TGLMULAIBRG DESC, s.TGLSTANDARBRG DESC, s.NOSTANDARBRG DESC
             """, spk_material_nos)
@@ -9742,7 +9745,7 @@ def _fetch_material_maps_batch(cur, work_rows):
             SELECT i.ITEMNO, COALESCE(SUM(h.QUANTITY), 0)
             FROM ITEM i
             LEFT JOIN ITEMHIST h ON h.ITEMNO = i.ITEMNO
-            WHERE i.ITEMNO IN ({_build_in_clause(material_nos)})
+            WHERE i.ITEMNO IN ({_build_in_clause(material_nos, "VARCHAR(255)")})
             GROUP BY i.ITEMNO
         """, material_nos)
         stock_map = {
@@ -9752,7 +9755,7 @@ def _fetch_material_maps_batch(cur, work_rows):
         cur.execute(f"""
             SELECT ITEMNO, MINIMUMQTY
             FROM ITEM
-            WHERE ITEMNO IN ({_build_in_clause(material_nos)})
+            WHERE ITEMNO IN ({_build_in_clause(material_nos, "VARCHAR(255)")})
         """, material_nos)
         for item_no, minimum_qty in cur.fetchall():
             key = str(item_no or "").strip()
