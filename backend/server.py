@@ -29,6 +29,7 @@ import os
 import re
 import threading
 import time
+import uuid
 import zipfile
 
 
@@ -181,6 +182,10 @@ NATS_SUBJECT = os.getenv("NATS_SUBJECT", "stock.material.sync")
 NATS_SYNC_INTERVAL = max(int(os.getenv("NATS_SYNC_INTERVAL", "60")), 10)
 NATS_LIMIT = max(int(os.getenv("NATS_LIMIT", "1000")), 1)
 NATS_CHUNK_SIZE = max(int(os.getenv("NATS_CHUNK_SIZE", "100")), 1)
+NATS_SPK_ENABLED = os.getenv("NATS_SPK_ENABLED", "0").lower() in {"1", "true", "yes"}
+NATS_SPK_SUBJECT = os.getenv("NATS_SPK_SUBJECT", "production.spk.summary")
+NATS_SPK_SYNC_INTERVAL = max(int(os.getenv("NATS_SPK_SYNC_INTERVAL", "300")), 10)
+NATS_SPK_CHUNK_SIZE = max(int(os.getenv("NATS_SPK_CHUNK_SIZE", "100")), 1)
 
 
 def configure_swagger(app):
@@ -15167,6 +15172,75 @@ def _nats_chunk(items, size):
         yield index // size, items[index:index + size]
 
 
+def _spk_summary_row(row):
+    qty = float(row[7] or 0)
+    qty_produced = float(row[15] or 0)
+    is_finished = qty <= 0 or qty_produced + 0.0001 >= qty
+    if is_finished and qty_produced > 0:
+        status = "Selesai"
+    elif qty_produced > 0:
+        status = "In Progress"
+    else:
+        status = "Belum Mulai"
+
+    return {
+        "wodet_id": int(row[0] or 0),
+        "no_spk": str(row[1] or "").strip(),
+        "tanggal": str(row[2]) if row[2] else "",
+        "estimasi": str(row[3]) if row[3] else "",
+        "deskripsi": str(row[4] or "").strip(),
+        "itemno": str(row[5] or "").strip(),
+        "job_desc": str(row[6] or "").strip(),
+        "qty": qty,
+        "uom": str(row[8] or "").strip(),
+        "nama_barang": str(row[10] or "").strip(),
+        "no_pesanan": str(row[12] or "").strip(),
+        "no_po": str(row[13] or "").strip(),
+        "tgl_selesai": str(row[14]) if row[14] and is_finished else "",
+        "qty_hasil_produksi": qty_produced,
+        "production_status": status,
+    }
+
+
+def get_spk_summary_data():
+    """Return production items only; material data stays out of NATS payloads."""
+    con = fdb.connect(**DB_CONFIG)
+    try:
+        cur = con.cursor()
+        cur.execute("""
+            SELECT
+                det.ID AS WODET_ID,
+                w.WONO,
+                w.WODATE,
+                w.EXPECTEDDATE,
+                w.DESCRIPTION,
+                det.ITEMNO,
+                det.JOBDESCRIPTION,
+                det.QUANTITY,
+                det.UNIT,
+                det.STATUS,
+                i.ITEMDESCRIPTION,
+                i.TIPEPERSEDIAAN,
+                so.SONO,
+                so.PONO,
+                (SELECT MAX(pr.RESULTDATE)
+                 FROM PRODRESULTDET prd
+                 JOIN PRODRESULT pr ON pr.ID = prd.PRODRESULTID
+                 WHERE prd.WODETID = det.ID),
+                (SELECT SUM(COALESCE(prd.QUANTITY, 0))
+                 FROM PRODRESULTDET prd
+                 WHERE prd.WODETID = det.ID)
+            FROM WO w
+            LEFT JOIN WODET det ON det.WOID = w.ID
+            LEFT JOIN SO so ON so.SOID = det.SOID
+            LEFT JOIN ITEM i ON i.ITEMNO = det.ITEMNO
+            ORDER BY w.WODATE DESC, w.WONO, det.NOJOB, det.ID
+        """)
+        return [_spk_summary_row(row) for row in cur.fetchall()]
+    finally:
+        con.close()
+
+
 def nats_sync():
     publisher = nats_publisher.get_publisher() if nats_publisher else None
     if publisher is None:
@@ -15201,6 +15275,45 @@ def nats_sync():
             app.logger.exception("NATS sync gagal: %s", exc)
         time.sleep(NATS_SYNC_INTERVAL)
 
+
+def nats_spk_sync():
+    publisher = nats_publisher.get_publisher() if nats_publisher else None
+    if publisher is None:
+        app.logger.warning("NATS publisher tidak tersedia; nats_spk_sync nonaktif")
+        return
+
+    subject = f"{NATS_SPK_SUBJECT}.replace"
+    while True:
+        try:
+            rows = get_spk_summary_data()
+            snapshot_id = (
+                f"spk-{datetime.utcnow().strftime('%Y%m%dT%H%M%S')}-"
+                f"{uuid.uuid4().hex[:8]}"
+            )
+            generated_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+            chunks = list(_nats_chunk(rows, NATS_SPK_CHUNK_SIZE))
+            if not chunks:
+                chunks = [(0, [])]
+            for chunk_index, chunk in chunks:
+                publisher.publish(subject, {
+                    "schema_version": 1,
+                    "event_type": "spk.summary.snapshot",
+                    "action": "replace",
+                    "snapshot_id": snapshot_id,
+                    "generated_at": generated_at,
+                    "chunk_index": chunk_index,
+                    "chunk_total": len(chunks),
+                    "total_rows": len(rows),
+                    "data": chunk,
+                })
+            app.logger.info(
+                "NATS SPK sync published subject=%s rows=%d chunks=%d snapshot_id=%s",
+                subject, len(rows), len(chunks), snapshot_id,
+            )
+        except Exception as exc:
+            app.logger.exception("NATS SPK sync gagal: %s", exc)
+        time.sleep(NATS_SPK_SYNC_INTERVAL)
+
 configure_swagger(app)
 
 
@@ -15214,6 +15327,10 @@ if __name__ == "__main__":
         nats_thread = threading.Thread(target=nats_sync)
         nats_thread.daemon = True
         nats_thread.start()
+    if NATS_SPK_ENABLED:
+        nats_spk_thread = threading.Thread(target=nats_spk_sync)
+        nats_spk_thread.daemon = True
+        nats_spk_thread.start()
     print(f"Server jalan di http://0.0.0.0:{BACKEND_PORT}", flush=True)
     print(f"Akses dari jaringan lokal: http://<IP-komputer-ini>:{BACKEND_PORT}", flush=True)
     socketio.run(app, host="0.0.0.0", debug=False, port=BACKEND_PORT, allow_unsafe_werkzeug=True)

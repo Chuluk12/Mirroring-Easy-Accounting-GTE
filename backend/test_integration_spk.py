@@ -9,6 +9,33 @@ import server
 
 
 class SpkIntegrationTest(unittest.TestCase):
+    def test_spk_summary_row_contains_production_item_without_material_fields(self):
+        row = [
+            10, "SPK-001", "2026-11-17", "2026-11-20", "Product A",
+            "ITEM-001", "Job A", 100, "PCS", 0, "Product A", "FG",
+            "SO-001", "PO-001", "2026-11-18", 40,
+        ]
+
+        result = server._spk_summary_row(row)
+
+        self.assertEqual(result["itemno"], "ITEM-001")
+        self.assertEqual(result["qty_hasil_produksi"], 40.0)
+        self.assertEqual(result["production_status"], "In Progress")
+        self.assertNotIn("materials", result)
+        self.assertNotIn("total_mat_plan", result)
+
+    def test_spk_summary_row_marks_finished_by_production_quantity(self):
+        row = [
+            11, "SPK-002", "2026-11-17", "2026-11-20", "Product B",
+            "ITEM-002", "Job B", 100, "PCS", 0, "Product B", "FG",
+            "", "", "2026-11-19", 100,
+        ]
+
+        result = server._spk_summary_row(row)
+
+        self.assertEqual(result["production_status"], "Selesai")
+        self.assertEqual(result["tgl_selesai"], "2026-11-19")
+
     def test_build_in_clause_casts_long_item_values(self):
         self.assertEqual(
             server._build_in_clause(["ITEM-1", "ITEM-2"], "VARCHAR(255)"),

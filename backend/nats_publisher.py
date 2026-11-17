@@ -23,6 +23,7 @@ class NATSPublisher:
         self._thread = None
         self._lock = threading.Lock()
         self._closed = threading.Event()
+        self._ready = threading.Event()
 
     def _start(self):
         if nats is None:
@@ -58,6 +59,7 @@ class NATSPublisher:
             self._nc = await nats.connect(
                 self.url, allow_reconnect=True, max_reconnect_attempts=-1,
             )
+        self._ready.set()
 
     async def _wait_closed(self):
         while not self._closed.is_set():
@@ -78,9 +80,15 @@ class NATSPublisher:
             return False
         if not self._start():
             return False
+        if not self._ready.wait(timeout=5):
+            return False
         if self._loop is None or self._nc is None:
             return False
         try:
+            if isinstance(payload, (dict, list)):
+                payload = json.dumps(payload, default=str).encode("utf-8")
+            elif isinstance(payload, str):
+                payload = payload.encode("utf-8")
             asyncio.run_coroutine_threadsafe(
                 self._publish(subject, payload), self._loop
             )
@@ -93,6 +101,7 @@ class NATSPublisher:
 
     def close(self):
         self._closed.set()
+        self._ready.clear()
         if self._thread is not None:
             self._thread.join(timeout=5)
         self._thread = None
@@ -116,5 +125,4 @@ def publish_json(subject, data):
     publisher = get_publisher()
     if publisher is None:
         return False
-    payload = json.dumps(data, default=str).encode("utf-8")
-    return publisher.publish(subject, payload)
+    return publisher.publish(subject, data)
