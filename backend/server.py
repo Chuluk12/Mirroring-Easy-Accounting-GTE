@@ -15200,9 +15200,8 @@ def _spk_summary_row(row):
 
 
 def get_spk_summary_data():
-    """Return active SPK items created or updated during current month."""
+    """Return active SPK items whose work order date is today."""
     today = datetime.now().date()
-    start_date = today.replace(day=1)
     con = fdb.connect(**DB_CONFIG)
     try:
         cur = con.cursor()
@@ -15233,18 +15232,8 @@ def get_spk_summary_data():
             LEFT JOIN WODET det ON det.WOID = w.ID
             LEFT JOIN SO so ON so.SOID = det.SOID
             LEFT JOIN ITEM i ON i.ITEMNO = det.ITEMNO
-            WHERE (
-                    (w.WODATE >= ? AND w.WODATE <= ?)
-                    OR EXISTS (
-                        SELECT 1
-                        FROM PRODRESULTDET updated_prd
-                        JOIN PRODRESULT updated_pr
-                          ON updated_pr.ID = updated_prd.PRODRESULTID
-                        WHERE updated_prd.WODETID = det.ID
-                          AND updated_pr.RESULTDATE >= ?
-                          AND updated_pr.RESULTDATE <= ?
-                    )
-              )
+            WHERE w.WODATE >= ?
+              AND w.WODATE < ?
               AND COALESCE(det.QUANTITY, 0) > 0
               AND COALESCE(
                   (SELECT SUM(COALESCE(prd.QUANTITY, 0))
@@ -15255,8 +15244,8 @@ def get_spk_summary_data():
             ORDER BY w.WODATE DESC, w.WONO, det.NOJOB, det.ID
         """, [
             NATS_PRODUCTION_LIMIT,
-            start_date, today,
-            start_date, today,
+            today,
+            today + timedelta(days=1),
         ])
         return [_spk_summary_row(row) for row in cur.fetchall()]
     finally:
