@@ -178,14 +178,11 @@ BACKGROUND_SYNC_ENABLED = os.getenv("EASY_BACKGROUND_SYNC_ENABLED", "0").lower()
 BACKGROUND_SYNC_INTERVAL = max(int(os.getenv("EASY_BACKGROUND_SYNC_INTERVAL", "60")), 10)
 
 NATS_ENABLED = os.getenv("NATS_ENABLED", "0").lower() in {"1", "true", "yes"}
-NATS_SUBJECT = os.getenv("NATS_SUBJECT", "stock.material.sync")
+NATS_STOCK_SUBJECT = os.getenv("NATS_STOCK_SUBJECT", "stock.material.sync")
+NATS_PRODUCTION_SUBJECT = os.getenv("NATS_PRODUCTION_SUBJECT", "production.spk.summary")
 NATS_SYNC_INTERVAL = max(int(os.getenv("NATS_SYNC_INTERVAL", "60")), 10)
 NATS_LIMIT = max(int(os.getenv("NATS_LIMIT", "1000")), 1)
 NATS_CHUNK_SIZE = max(int(os.getenv("NATS_CHUNK_SIZE", "100")), 1)
-NATS_SPK_ENABLED = os.getenv("NATS_SPK_ENABLED", "0").lower() in {"1", "true", "yes"}
-NATS_SPK_SUBJECT = os.getenv("NATS_SPK_SUBJECT", "production.spk.summary")
-NATS_SPK_SYNC_INTERVAL = max(int(os.getenv("NATS_SPK_SYNC_INTERVAL", "300")), 10)
-NATS_SPK_CHUNK_SIZE = max(int(os.getenv("NATS_SPK_CHUNK_SIZE", "100")), 1)
 
 
 def configure_swagger(app):
@@ -15247,7 +15244,7 @@ def nats_sync():
         app.logger.warning("NATS publisher tidak tersedia; nats_sync nonaktif")
         return
 
-    subject = f"{NATS_SUBJECT}.replace"
+    subject = f"{NATS_STOCK_SUBJECT}.replace"
     while True:
         try:
             result = get_stock_item_material_data(
@@ -15282,7 +15279,7 @@ def nats_spk_sync():
         app.logger.warning("NATS publisher tidak tersedia; nats_spk_sync nonaktif")
         return
 
-    subject = f"{NATS_SPK_SUBJECT}.replace"
+    subject = f"{NATS_PRODUCTION_SUBJECT}.replace"
     while True:
         try:
             rows = get_spk_summary_data()
@@ -15291,7 +15288,7 @@ def nats_spk_sync():
                 f"{uuid.uuid4().hex[:8]}"
             )
             generated_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
-            chunks = list(_nats_chunk(rows, NATS_SPK_CHUNK_SIZE))
+            chunks = list(_nats_chunk(rows, NATS_CHUNK_SIZE))
             if not chunks:
                 chunks = [(0, [])]
             for chunk_index, chunk in chunks:
@@ -15312,7 +15309,7 @@ def nats_spk_sync():
             )
         except Exception as exc:
             app.logger.exception("NATS SPK sync gagal: %s", exc)
-        time.sleep(NATS_SPK_SYNC_INTERVAL)
+        time.sleep(NATS_SYNC_INTERVAL)
 
 configure_swagger(app)
 
@@ -15327,7 +15324,6 @@ if __name__ == "__main__":
         nats_thread = threading.Thread(target=nats_sync)
         nats_thread.daemon = True
         nats_thread.start()
-    if NATS_SPK_ENABLED:
         nats_spk_thread = threading.Thread(target=nats_spk_sync)
         nats_spk_thread.daemon = True
         nats_spk_thread.start()
