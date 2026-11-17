@@ -18,7 +18,9 @@ class SpkIntegrationTest(unittest.TestCase):
 
         result = server._spk_summary_row(row)
 
-        self.assertEqual(result["itemno"], "ITEM-001")
+        self.assertEqual(result["no_barang"], "ITEM-001")
+        self.assertEqual(result["no_perintah_kerja"], "SPK-001")
+        self.assertEqual(result["deskripsi_pekerjaan"], "Job A")
         self.assertEqual(result["qty_hasil_produksi"], 40.0)
         self.assertEqual(result["production_status"], "In Progress")
         self.assertNotIn("materials", result)
@@ -34,7 +36,7 @@ class SpkIntegrationTest(unittest.TestCase):
         result = server._spk_summary_row(row)
 
         self.assertEqual(result["production_status"], "Selesai")
-        self.assertEqual(result["tgl_selesai"], "2026-11-19")
+        self.assertEqual(result["tgl_selesai_produksi"], "2026-11-19")
 
     def test_build_in_clause_casts_long_item_values(self):
         self.assertEqual(
