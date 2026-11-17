@@ -183,6 +183,7 @@ NATS_PRODUCTION_SUBJECT = os.getenv("NATS_PRODUCTION_SUBJECT", "production.spk.s
 NATS_SYNC_INTERVAL = max(int(os.getenv("NATS_SYNC_INTERVAL", "60")), 10)
 NATS_LIMIT = max(int(os.getenv("NATS_LIMIT", "1000")), 1)
 NATS_CHUNK_SIZE = max(int(os.getenv("NATS_CHUNK_SIZE", "100")), 1)
+NATS_PRODUCTION_LIMIT = min(max(int(os.getenv("NATS_PRODUCTION_LIMIT", "100")), 1), 100)
 
 
 def configure_swagger(app):
@@ -15199,12 +15200,14 @@ def _spk_summary_row(row):
 
 
 def get_spk_summary_data():
-    """Return production items only; material data stays out of NATS payloads."""
+    """Return active SPK items created or updated during current month."""
+    today = datetime.now().date()
+    start_date = today.replace(day=1)
     con = fdb.connect(**DB_CONFIG)
     try:
         cur = con.cursor()
         cur.execute("""
-            SELECT
+            SELECT FIRST ?
                 det.ID AS WODET_ID,
                 w.WONO,
                 w.WODATE,
@@ -15230,8 +15233,31 @@ def get_spk_summary_data():
             LEFT JOIN WODET det ON det.WOID = w.ID
             LEFT JOIN SO so ON so.SOID = det.SOID
             LEFT JOIN ITEM i ON i.ITEMNO = det.ITEMNO
+            WHERE (
+                    (w.WODATE >= ? AND w.WODATE <= ?)
+                    OR EXISTS (
+                        SELECT 1
+                        FROM PRODRESULTDET updated_prd
+                        JOIN PRODRESULT updated_pr
+                          ON updated_pr.ID = updated_prd.PRODRESULTID
+                        WHERE updated_prd.WODETID = det.ID
+                          AND updated_pr.RESULTDATE >= ?
+                          AND updated_pr.RESULTDATE <= ?
+                    )
+              )
+              AND COALESCE(det.QUANTITY, 0) > 0
+              AND COALESCE(
+                  (SELECT SUM(COALESCE(prd.QUANTITY, 0))
+                   FROM PRODRESULTDET prd
+                   WHERE prd.WODETID = det.ID),
+                  0
+              ) < COALESCE(det.QUANTITY, 0)
             ORDER BY w.WODATE DESC, w.WONO, det.NOJOB, det.ID
-        """)
+        """, [
+            NATS_PRODUCTION_LIMIT,
+            start_date, today,
+            start_date, today,
+        ])
         return [_spk_summary_row(row) for row in cur.fetchall()]
     finally:
         con.close()
