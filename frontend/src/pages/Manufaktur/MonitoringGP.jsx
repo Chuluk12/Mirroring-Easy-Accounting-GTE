@@ -85,8 +85,8 @@ const exportColumns = [
   { key: 'formula_material_count', label: 'Material Formula', type: 'number' },
   { key: 'spk_material_count', label: 'Material SPK', type: 'number' },
   { key: 'spm_material_count', label: 'Material SPM', type: 'number' },
-  { key: 'formula_material_cost', label: 'Biaya Material Formula', type: 'accounting' },
-  { key: 'formula_production_cost', label: 'Biaya Produksi Formula', type: 'accounting' },
+  { key: 'formula_material_cost', label: 'Biaya Material Formula (Qty GP)', type: 'accounting' },
+  { key: 'formula_production_cost', label: 'Biaya Produksi Formula (Qty GP)', type: 'accounting' },
   { key: 'formula_total_cost', label: 'Total Biaya Formula (Qty GP)', type: 'accounting' },
   { key: 'spm_material_cost', label: 'Biaya SPM (Qty GP)', type: 'accounting' },
   { key: 'spk_material_cost', label: 'Biaya Material SPK', type: 'accounting' },
@@ -110,7 +110,7 @@ const materialExportColumns = [
   { key: 'unit', label: 'UOM Material' },
   { key: 'formula_cost_for_spk_qty', label: 'Biaya Material Formula x Qty SPK', type: 'accounting' },
   { key: 'spk_cost', label: 'Biaya Material SPK', type: 'accounting' },
-  { key: 'spm_cost', label: 'Biaya Material SPM', type: 'accounting' },
+  { key: 'spm_cost_for_gp', label: 'Biaya Material SPM (Qty GP)', type: 'accounting' },
   { key: 'material_cost_diff', label: 'Selisih Biaya Material', type: 'accounting' },
   { key: 'cost_description', label: 'Deskripsi Biaya' },
 ]
@@ -151,12 +151,23 @@ function addFormulaSummaryToGp(gp, formula) {
   const spkQty = Number(gp.qty_spk || 0)
   const gpQty = Number(gp.qty_gp || 0)
   const ratio = spkQty > 0 ? gpQty / spkQty : 0
+  const formulaMaterialCost = formula.formula_material_cost == null
+    ? null
+    : Number(formula.formula_material_cost) * ratio
+  const formulaProductionCost = formula.formula_production_cost == null
+    ? null
+    : Number(formula.formula_production_cost) * ratio
   return {
     ...gp,
     ...summary,
-    // Monitoring GP is per hasil produksi. Formula/SPM summaries are per SPK,
-    // so allocate those totals to this GP by its share of the SPK quantity.
-    formula_total_cost: formula.formula_total_cost == null ? null : Number(formula.formula_total_cost) * ratio,
+    // Keep all formula summary columns on the GP quantity basis so the two
+    // components add up to the displayed formula total.
+    formula_material_cost: formulaMaterialCost,
+    formula_production_cost: formulaProductionCost,
+    formula_total_cost: formula.formula_total_cost == null
+      ? null
+      : formulaMaterialCost + formulaProductionCost,
+    // SPM summary is also allocated from the SPK basis to this GP quantity.
     spm_material_cost: formula.spm_material_cost == null ? null : Number(formula.spm_material_cost) * ratio,
   }
 }
@@ -268,8 +279,16 @@ export default function MonitoringGP() {
           allRows.push(gpRow)
           if (!formula) continue
           const parent = Object.fromEntries(gpReferenceColumns.map(column => [column.key, gpRow[column.key]]))
+          const spmRatio = Number(gp.qty_spk || 0) > 0
+            ? Number(gp.qty_gp || 0) / Number(gp.qty_spk)
+            : 0
           for (const material of formula.materials || []) {
-            materialRows.push({ ...material, ...parent, spk_qty_material: material.spk_qty })
+            materialRows.push({
+              ...material,
+              ...parent,
+              spk_qty_material: material.spk_qty,
+              spm_cost_for_gp: material.spm_cost == null ? null : Number(material.spm_cost) * spmRatio,
+            })
           }
           for (const production of formula.production_details || []) {
             productionRows.push({ ...production, ...parent, spk_qty_production: production.spk_qty })
@@ -321,8 +340,8 @@ export default function MonitoringGP() {
     { title: 'Material Formula', dataIndex: 'formula_material_count', width: 125, align: 'right', render: value => value == null ? '-' : <Tag color="cyan">{value}</Tag> },
     { title: 'Material SPK', dataIndex: 'spk_material_count', width: 115, align: 'right', render: value => value == null ? '-' : <Tag color="geekblue">{value}</Tag> },
     { title: 'Material SPM', dataIndex: 'spm_material_count', width: 115, align: 'right', render: value => value == null ? '-' : <Tag color="blue">{value}</Tag> },
-    { title: 'Biaya Material Formula', dataIndex: 'formula_material_cost', width: 175, align: 'right', render: optionalMoney },
-    { title: 'Biaya Produksi Formula', dataIndex: 'formula_production_cost', width: 175, align: 'right', render: optionalMoney },
+    { title: 'Biaya Material Formula (Qty GP)', dataIndex: 'formula_material_cost', width: 195, align: 'right', render: optionalMoney },
+    { title: 'Biaya Produksi Formula (Qty GP)', dataIndex: 'formula_production_cost', width: 195, align: 'right', render: optionalMoney },
     { title: 'Total Biaya Formula (Qty GP)', dataIndex: 'formula_total_cost', width: 205, align: 'right', render: optionalMoney },
     { title: 'Biaya SPM (Qty GP)', dataIndex: 'spm_material_cost', width: 180, align: 'right', render: optionalMoney },
     { title: 'Biaya Material SPK', dataIndex: 'spk_material_cost', width: 165, align: 'right', render: optionalMoney },
