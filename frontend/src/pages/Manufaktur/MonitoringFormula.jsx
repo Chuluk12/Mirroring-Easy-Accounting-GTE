@@ -36,6 +36,8 @@ const STATUS_OPTIONS = [
 const MONITORING_FORMULA_EXPORT_COLS = [
   { key: 'no_spk', label: 'No SPK' },
   { key: 'tanggal', label: 'Tgl SPK', type: 'date' },
+  { key: 'no_pesanan', label: 'No SO' },
+  { key: 'sales_total', label: 'Valuasi SO', type: 'accounting' },
   { key: 'no_spm', label: 'No SPM', permissionKey: 'materials' },
   { key: 'tgl_spm', label: 'Tgl SPM', permissionKey: 'materials' },
   { key: 'tgl_qc', label: 'Tgl QC' },
@@ -69,6 +71,8 @@ const MONITORING_FORMULA_EXPORT_COLS = [
 const PRODUCTION_COST_EXPORT_COLS = [
   { key: 'no_spk', label: 'No SPK' },
   { key: 'tanggal', label: 'Tgl SPK', type: 'date' },
+  { key: 'no_pesanan', label: 'No SO' },
+  { key: 'sales_total', label: 'Valuasi SO', type: 'accounting' },
   { key: 'no_gp', label: 'No GP', permissionKey: 'production_results' },
   { key: 'no_job', label: 'No. Job' },
   { key: 'tgl_gp', label: 'Tgl GP', type: 'date', permissionKey: 'tgl_selesai' },
@@ -104,7 +108,7 @@ const SALES_PRICE_EXPORT_COLS = [
   { key: 'no_faktur', label: 'No Faktur' },
   { key: 'tgl_faktur', label: 'Tgl Faktur' },
   { key: 'sales_unit_price', label: 'Harga Jual/Unit', type: 'accounting' },
-  { key: 'sales_total', label: 'Total Harga Jual', type: 'accounting' },
+  { key: 'sales_total', label: 'Valuasi SO', type: 'accounting' },
   { key: 'hpp_per_unit', label: 'HPP/Unit Berdasarkan Qty GP', type: 'accounting' },
   { key: 'hpp_per_unit_spk', label: 'HPP/Unit Berdasarkan Qty SPK', type: 'accounting' },
   { key: 'spk_total_cost', label: 'Total HPP SPK', type: 'accounting' },
@@ -115,6 +119,8 @@ const SALES_PRICE_EXPORT_COLS = [
 const EXPORT_PARENT_COLS = [
   { key: 'no_spk', label: 'No SPK' },
   { key: 'tanggal', label: 'Tanggal SPK', type: 'date' },
+  { key: 'no_pesanan', label: 'No SO' },
+  { key: 'sales_total', label: 'Valuasi SO', type: 'accounting' },
   { key: 'no_hasil_produksi', label: 'No Hasil Produksi / GP' },
   { key: 'tgl_selesai', label: 'Tgl Selesai Produksi', type: 'date' },
   { key: 'no_barang', label: 'No Barang' },

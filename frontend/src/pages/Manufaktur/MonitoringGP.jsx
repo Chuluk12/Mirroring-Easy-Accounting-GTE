@@ -73,6 +73,8 @@ const exportColumns = [
   { key: 'tgl_gp', label: 'Tanggal GP', type: 'date' },
   { key: 'no_spk', label: 'No SPK' },
   { key: 'tgl_spk', label: 'Tanggal SPK', type: 'date' },
+  { key: 'no_pesanan', label: 'No SO' },
+  { key: 'sales_total', label: 'Valuasi SO', type: 'accounting' },
   { key: 'no_job', label: 'No JOB' },
   { key: 'no_barang', label: 'No Barang' },
   { key: 'code_product', label: 'Code Product' },
