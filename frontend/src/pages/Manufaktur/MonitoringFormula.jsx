@@ -38,6 +38,9 @@ const MONITORING_FORMULA_EXPORT_COLS = [
   { key: 'tanggal', label: 'Tgl SPK', type: 'date' },
   { key: 'no_pesanan', label: 'No SO' },
   { key: 'sales_total', label: 'Valuasi SO', type: 'accounting' },
+  { key: 'gross_margin', label: 'Gross Margin', type: 'accounting' },
+  { key: 'spk_material_cost', label: 'Biaya Material SPK', type: 'accounting' },
+  { key: 'spk_production_cost', label: 'Biaya Produksi SPK', type: 'accounting' },
   { key: 'no_spm', label: 'No SPM', permissionKey: 'materials' },
   { key: 'tgl_spm', label: 'Tgl SPM', permissionKey: 'materials' },
   { key: 'tgl_qc', label: 'Tgl QC' },
@@ -73,6 +76,9 @@ const PRODUCTION_COST_EXPORT_COLS = [
   { key: 'tanggal', label: 'Tgl SPK', type: 'date' },
   { key: 'no_pesanan', label: 'No SO' },
   { key: 'sales_total', label: 'Valuasi SO', type: 'accounting' },
+  { key: 'gross_margin', label: 'Gross Margin', type: 'accounting' },
+  { key: 'spk_material_cost', label: 'Biaya Material SPK', type: 'accounting' },
+  { key: 'spk_production_cost', label: 'Biaya Produksi SPK', type: 'accounting' },
   { key: 'no_gp', label: 'No GP', permissionKey: 'production_results' },
   { key: 'no_job', label: 'No. Job' },
   { key: 'tgl_gp', label: 'Tgl GP', type: 'date', permissionKey: 'tgl_selesai' },
@@ -109,6 +115,9 @@ const SALES_PRICE_EXPORT_COLS = [
   { key: 'tgl_faktur', label: 'Tgl Faktur' },
   { key: 'sales_unit_price', label: 'Harga Jual/Unit', type: 'accounting' },
   { key: 'sales_total', label: 'Valuasi SO', type: 'accounting' },
+  { key: 'gross_margin', label: 'Gross Margin', type: 'accounting' },
+  { key: 'spk_material_cost', label: 'Biaya Material SPK', type: 'accounting' },
+  { key: 'spk_production_cost', label: 'Biaya Produksi SPK', type: 'accounting' },
   { key: 'hpp_per_unit', label: 'HPP/Unit Berdasarkan Qty GP', type: 'accounting' },
   { key: 'hpp_per_unit_spk', label: 'HPP/Unit Berdasarkan Qty SPK', type: 'accounting' },
   { key: 'spk_total_cost', label: 'Total HPP SPK', type: 'accounting' },
@@ -121,6 +130,9 @@ const EXPORT_PARENT_COLS = [
   { key: 'tanggal', label: 'Tanggal SPK', type: 'date' },
   { key: 'no_pesanan', label: 'No SO' },
   { key: 'sales_total', label: 'Valuasi SO', type: 'accounting' },
+  { key: 'gross_margin', label: 'Gross Margin', type: 'accounting' },
+  { key: 'spk_material_cost', label: 'Biaya Material SPK', type: 'accounting' },
+  { key: 'spk_production_cost', label: 'Biaya Produksi SPK', type: 'accounting' },
   { key: 'no_hasil_produksi', label: 'No Hasil Produksi / GP' },
   { key: 'tgl_selesai', label: 'Tgl Selesai Produksi', type: 'date' },
   { key: 'no_barang', label: 'No Barang' },
@@ -491,6 +503,11 @@ export default function MonitoringFormula() {
     tgl_faktur: row.tgl_faktur,
     sales_unit_price: row.sales_unit_price,
     sales_total: row.sales_total,
+    gross_margin: row.sales_total == null || row.spk_total_cost == null
+      ? null
+      : Number(row.sales_total) - Number(row.spk_total_cost),
+    spk_material_cost: row.spk_material_cost,
+    spk_production_cost: row.spk_production_cost,
     hpp_per_unit: row.hpp_per_unit,
     hpp_per_unit_spk: row.hpp_per_unit_spk,
     spk_total_cost: row.spk_total_cost,
@@ -1049,6 +1066,18 @@ export default function MonitoringFormula() {
       width: 145,
       align: 'right',
       render: value => value == null ? '-' : <Text style={currencyTextStyle}>{formatCurrency(value)}</Text>,
+    },
+    {
+      title: 'Gross Margin',
+      dataIndex: 'gross_margin',
+      key: 'gross_margin',
+      width: 155,
+      align: 'right',
+      render: (_, record) => {
+        if (record.sales_total == null || record.spk_total_cost == null) return '-'
+        const value = Number(record.sales_total) - Number(record.spk_total_cost)
+        return <Text type={value < 0 ? 'danger' : 'success'}>{formatCurrency(value)}</Text>
+      },
     },
     {
       title: 'No Hasil Produksi / GP',
