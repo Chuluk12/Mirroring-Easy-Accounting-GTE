@@ -146,7 +146,7 @@ export default function MonitoringSPK() {
       ),
     },
     {
-      title: 'No Pesanan',
+      title: 'No SO',
       dataIndex: 'no_pesanan',
       key: 'no_pesanan',
       width: 155,
@@ -158,6 +158,14 @@ export default function MonitoringSPK() {
           </Tag>
         )
       },
+    },
+    {
+      title: 'Valuasi SO',
+      dataIndex: 'sales_total',
+      key: 'sales_total',
+      width: 145,
+      align: 'right',
+      render: val => val == null ? '-' : Number(val).toLocaleString('id-ID', { style: 'currency', currency: 'IDR', maximumFractionDigits: 2 }),
     },
     {
       title: 'No PO',

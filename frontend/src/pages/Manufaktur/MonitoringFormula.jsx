@@ -1030,6 +1030,21 @@ export default function MonitoringFormula() {
       render: value => value ? dayjs(value).format('DD/MM/YYYY') : '-',
     },
     {
+      title: 'No SO',
+      dataIndex: 'no_pesanan',
+      key: 'no_pesanan',
+      width: 150,
+      render: value => value ? <Tag color="geekblue">{value}</Tag> : <Text type="secondary">Internal</Text>,
+    },
+    {
+      title: 'Valuasi SO',
+      dataIndex: 'sales_total',
+      key: 'sales_total',
+      width: 145,
+      align: 'right',
+      render: value => value == null ? '-' : <Text style={currencyTextStyle}>{formatCurrency(value)}</Text>,
+    },
+    {
       title: 'No Hasil Produksi / GP',
       key: 'no_hasil_produksi',
       width: 170,

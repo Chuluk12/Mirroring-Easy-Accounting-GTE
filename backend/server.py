@@ -10892,7 +10892,8 @@ def api_spk():
                     i.TIPEPERSEDIAAN,
                     so.SONO,
                     so.PONO,
-                    det.NOJOB
+                    det.NOJOB,
+                    det.SOID AS SO_ID
                 FROM WO w
                 LEFT JOIN WODET det ON det.WOID  = w.ID
                 LEFT JOIN SO so     ON so.SOID   = det.SOID
@@ -10933,11 +10934,17 @@ def api_spk():
                      FROM WODETMAT wdm
                      JOIN MATRLSDET md ON md.WODETID = wdm.ID
                      WHERE wdm.WODETID = p.WODET_ID),
-                    (SELECT SUM(md.QUANTITY)
-                     FROM MATRLSDET md
-                     WHERE md.WODETID = p.WODET_ID),
-                    0
-                )
+                     (SELECT SUM(md.QUANTITY)
+                      FROM MATRLSDET md
+                      WHERE md.WODETID = p.WODET_ID),
+                     0
+                 ),
+                 (SELECT FIRST 1
+                     sd.QUANTITY * sd.UNITPRICE
+                     * (1 - COALESCE(CAST(NULLIF(TRIM(sd.DISCPC), '') AS DOUBLE PRECISION), 0) / 100)
+                  FROM SODET sd
+                  WHERE sd.SOID = p.SO_ID AND sd.ITEMNO = p.ITEMNO
+                  ORDER BY sd.SEQ)
             FROM page_rows p
             ORDER BY p.WODATE DESC, p.WONO, p.NOJOB
         """, [query_limit, offset] + params_where)
@@ -11003,17 +11010,16 @@ def api_spk():
                 "status_barang":      int(r[9]  or 0),
                 "nama_barang":        str(r[10] or "").strip(),
                 "tipe_persediaan":    str(r[11] or "").strip(),
-                "no_pesanan":         str(r[11] or "").strip(),   # SO.SONO — kosong jika SPK internal
-                "no_po":              str(r[12] or "").strip(),   # SO.PONO — No PO dari customer
-                "no_pesanan":         str(r[12] or "").strip(),
-                "no_po":              str(r[13] or "").strip(),
+                "no_pesanan":         str(r[12] or "").strip(),   # SO.SONO — kosong jika SPK internal
+                "no_po":              str(r[13] or "").strip(),   # SO.PONO — No PO dari customer
                 "tgl_selesai":        tgl_selesai,                # Terisi hanya jika total hasil produksi sudah memenuhi qty SPK
                 "qty_hasil_produksi": total_qty_hasil,
                 "total_mat_plan":     total_mat_plan,
-                "total_mat_keluar":   total_processed,
-                "material_progress":  material_progress,
-                "production_status":  production_status,
-            })
+                 "total_mat_keluar":   total_processed,
+                 "material_progress":  material_progress,
+                 "production_status":  production_status,
+                 "sales_total":        float(r[19]) if r[19] is not None else None,
+             })
 
         return jsonify({
             "data":       filter_record_columns("spk", data),
@@ -11461,6 +11467,7 @@ def api_monitoring_gp():
             JOIN PRODRESULTDET prd ON prd.PRODRESULTID = pr.ID
             LEFT JOIN WO wo ON wo.ID = pr.WOID
             LEFT JOIN WODET wd ON wd.ID = prd.WODETID
+            LEFT JOIN SO so ON so.SOID = wd.SOID
             LEFT JOIN ITEM i ON i.ITEMNO = prd.ITEMNO
         """
         con = fdb.connect(**DB_CONFIG)
@@ -11475,7 +11482,14 @@ def api_monitoring_gp():
                 pr.DESCRIPTION, prd.ITEMNO, i.ITEMDESCRIPTION,
                 prd.QUANTITY, prd.UNIT, wd.QUANTITY, prd.WODETID,
                 prd.COST, wd.NOJOB,
-                {_stock_code_product_expr(cur)}
+                {_stock_code_product_expr(cur)},
+                so.SONO,
+                (SELECT FIRST 1
+                    sd.QUANTITY * sd.UNITPRICE
+                    * (1 - COALESCE(CAST(NULLIF(TRIM(sd.DISCPC), '') AS DOUBLE PRECISION), 0) / 100)
+                 FROM SODET sd
+                 WHERE sd.SOID = wd.SOID AND sd.ITEMNO = prd.ITEMNO
+                 ORDER BY sd.SEQ)
             {from_sql}
             WHERE {where_sql}
             ORDER BY pr.RESULTDATE DESC, pr.RESULTNO DESC, prd.ID
@@ -11496,9 +11510,11 @@ def api_monitoring_gp():
                 "qty_gp": qty_gp, "qty_spk": qty_spk,
                 "uom": str(row[10] or "").strip(),
                 "wodet_id": row[12], "biaya_gp": float(row[13] or 0),
-                "no_job": str(row[14] or "").strip(),
-                "code_product": str(row[15] or "").strip(),
-                "persentase": round(min(qty_gp / qty_spk * 100, 100), 1) if qty_spk > 0 else 0,
+                 "no_job": str(row[14] or "").strip(),
+                 "code_product": str(row[15] or "").strip(),
+                 "no_pesanan": str(row[16] or "").strip(),
+                 "sales_total": float(row[17]) if row[17] is not None else None,
+                 "persentase": round(min(qty_gp / qty_spk * 100, 100), 1) if qty_spk > 0 else 0,
             })
         has_more = skip_count and len(data) > limit
         if skip_count:

@@ -328,6 +328,8 @@ export default function MonitoringGP() {
     { title: 'Tanggal GP', dataIndex: 'tgl_gp', width: 120, render: value => value ? dayjs(value).format('DD/MM/YYYY') : '-' },
     { title: 'No SPK', dataIndex: 'no_spk', width: 160 },
     { title: 'Tanggal SPK', dataIndex: 'tgl_spk', width: 120, render: value => value ? dayjs(value).format('DD/MM/YYYY') : '-' },
+    { title: 'No SO', dataIndex: 'no_pesanan', width: 150, render: value => value || '-' },
+    { title: 'Valuasi SO', dataIndex: 'sales_total', width: 145, align: 'right', render: optionalMoney },
     { title: 'No JOB', dataIndex: 'no_job', width: 160, render: value => value ? <Text code>{value}</Text> : '-' },
     { title: 'No Barang', dataIndex: 'no_barang', width: 180 },
     { title: 'Code Product', dataIndex: 'code_product', width: 140, render: value => value || '-' },
