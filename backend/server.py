@@ -10490,7 +10490,7 @@ def api_monitoring_formula():
 
         material_maps = _fetch_material_maps_batch(cur, work_rows)
         try:
-            material_qty_snapshots = _record_spk_material_qty_snapshots(material_maps)
+            material_qty_snapshots = {} if bulk_export else _record_spk_material_qty_snapshots(material_maps)
         except Exception as snapshot_error:
             app.logger.exception("Gagal mencatat riwayat Qty material SPK: %s", snapshot_error)
             material_qty_snapshots = {}
