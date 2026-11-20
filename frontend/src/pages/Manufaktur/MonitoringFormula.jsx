@@ -71,33 +71,6 @@ const MONITORING_FORMULA_EXPORT_COLS = [
   { key: 'cost_description', label: 'Deskripsi Biaya', permissionKey: 'materials' },
 ]
 
-const PRODUCTION_COST_EXPORT_COLS = [
-  { key: 'no_spk', label: 'No SPK' },
-  { key: 'tanggal', label: 'Tgl SPK', type: 'date' },
-  { key: 'no_pesanan', label: 'No SO' },
-  { key: 'sales_total', label: 'Valuasi SO', type: 'accounting' },
-  { key: 'gross_margin', label: 'Gross Margin', type: 'accounting' },
-  { key: 'spk_material_cost', label: 'Biaya Material SPK', type: 'accounting' },
-  { key: 'spk_production_cost', label: 'Biaya Produksi SPK', type: 'accounting' },
-  { key: 'no_gp', label: 'No GP', permissionKey: 'production_results' },
-  { key: 'no_job', label: 'No. Job' },
-  { key: 'tgl_gp', label: 'Tgl GP', type: 'date', permissionKey: 'tgl_selesai' },
-  { key: 'product_code', label: 'Code Product (Barang Jadi)', permissionKey: 'no_barang' },
-  { key: 'no_barang', label: 'No Barang Jadi' },
-  { key: 'nama_barang', label: 'Deskripsi Barang Jadi' },
-  { key: 'cost_no', label: 'No Biaya', permissionKey: 'production_details' },
-  { key: 'description', label: 'Deskripsi Biaya', permissionKey: 'production_details' },
-  { key: 'cost_source', label: 'Sumber Biaya', permissionKey: 'production_details' },
-  { key: 'comparison_status', label: 'Status Perbandingan', permissionKey: 'production_details' },
-  { key: 'formula_qty_for_spk_qty', label: 'Jam Formula * Qty SPK', type: 'number', permissionKey: 'production_details' },
-  { key: 'spk_qty', label: 'Jam SPK', type: 'number', permissionKey: 'production_details' },
-  { key: 'formula_unit_cost', label: 'Biaya/Jam Formula', type: 'accounting', permissionKey: 'formula_production_cost' },
-  { key: 'spk_unit_cost', label: 'Biaya/Jam SPK', type: 'accounting', permissionKey: 'spk_production_cost' },
-  { key: 'formula_cost_for_spk_qty', label: 'Jumlah Biaya Formula', type: 'accounting', permissionKey: 'formula_production_cost' },
-  { key: 'spk_cost', label: 'Jumlah Biaya SPK', type: 'accounting', permissionKey: 'spk_production_cost' },
-  { key: 'remarks', label: 'Remarks' },
-]
-
 const SALES_PRICE_EXPORT_COLS = [
   { key: 'no_spk', label: 'No SPK' },
   { key: 'tanggal', label: 'Tgl SPK', type: 'date' },
@@ -676,18 +649,21 @@ export default function MonitoringFormula() {
   }
 
   const exportMonitoringRows = (exportRows, filename) => {
-    const exportColumns = filterExportColumnsByPermission('monitoring_formula', MONITORING_FORMULA_EXPORT_COLS, user)
-    const productionColumns = filterExportColumnsByPermission('monitoring_formula', PRODUCTION_COST_EXPORT_COLS, user)
-    const salesColumns = filterExportColumnsByPermission('monitoring_formula', SALES_PRICE_EXPORT_COLS, user)
+    const totalColumns = filterExportColumnsByPermission('monitoring_formula', SALES_PRICE_EXPORT_COLS, user)
+    const materialColumns = filterExportColumnsByPermission('monitoring_formula', MATERIAL_DETAIL_EXPORT_COLS, user)
+    const productionColumns = filterExportColumnsByPermission('monitoring_formula', PRODUCTION_DETAIL_EXPORT_COLS, user)
+    const wipColumns = filterExportColumnsByPermission('monitoring_formula', WIP_RECONCILIATION_EXPORT_COLS, user)
+    const totalRows = buildSalesPriceExportRows(exportRows)
     const materialRows = buildMonitoringExportRows(exportRows)
     const productionRows = buildProductionCostExportRows(exportRows)
-    const salesRows = buildSalesPriceExportRows(exportRows)
+    const wipRows = buildWipExportRows(exportRows)
     downloadWorkbookXLS([
-      { name: 'Material', columns: exportColumns, rows: materialRows },
-      { name: 'Biaya Produksi', columns: productionColumns, rows: productionRows },
-      { name: 'Harga Jual', columns: salesColumns, rows: salesRows },
+      { name: 'Monitoring Formula', columns: totalColumns, rows: totalRows },
+      { name: 'Material per SPK', columns: materialColumns, rows: materialRows },
+      { name: 'Biaya Produksi per SPK', columns: productionColumns, rows: productionRows },
+      { name: 'WIP SPK Terkait', columns: wipColumns, rows: wipRows },
     ], filename)
-    return { materialRows, productionRows, salesRows }
+    return { totalRows, materialRows, productionRows, wipRows }
   }
 
   const fetchAllExportRows = async (dateFrom, dateTo, label, includeCurrentFilters = true) => {
@@ -705,7 +681,7 @@ export default function MonitoringFormula() {
 
     while (hasMore) {
       const res = await api.get('/api/monitoring-formula', {
-        params: { ...filters, offset, limit: pageSize, bulk_export: 1, skip_count: 1 },
+        params: { ...filters, offset, limit: pageSize, bulk_export: 1, include_wip: 1, skip_count: 1 },
         timeout: 90000,
       })
       const batch = res.data.data || []
@@ -736,7 +712,7 @@ export default function MonitoringFormula() {
       }
 
       const filename = `MonitoringFormula_${dateFrom}_sd_${dateTo}`
-      const { materialRows, productionRows, salesRows } = exportMonitoringRows(exportRows, filename)
+       const { totalRows, materialRows, productionRows, wipRows } = exportMonitoringRows(exportRows, filename)
 
       try {
         await api.post('/api/audit/event', {
@@ -755,7 +731,7 @@ export default function MonitoringFormula() {
         // Audit failure should not block the downloaded export.
       }
       message.success({
-        content: `${exportRows.length} SPK (${materialRows.length} material, ${productionRows.length} biaya produksi, ${salesRows.length} harga jual) berhasil diekspor`,
+        content: `${totalRows.length} SPK (${materialRows.length} material, ${productionRows.length} biaya produksi, ${wipRows.length} WIP) berhasil diekspor`,
         key: 'export',
       })
     } catch (error) {
@@ -780,7 +756,7 @@ export default function MonitoringFormula() {
       }
 
       const filename = `MonitoringFormula_${month.format('YYYY_MM')}`
-      const { materialRows, productionRows, salesRows } = exportMonitoringRows(exportRows, filename)
+       const { totalRows, materialRows, productionRows, wipRows } = exportMonitoringRows(exportRows, filename)
       try {
         await api.post('/api/audit/event', {
           action: 'export',
@@ -792,7 +768,7 @@ export default function MonitoringFormula() {
         // Audit failure should not block the downloaded export.
       }
       message.success({
-        content: `${exportRows.length} SPK (${materialRows.length} material, ${productionRows.length} biaya produksi, ${salesRows.length} harga jual) berhasil diekspor`,
+        content: `${totalRows.length} SPK (${materialRows.length} material, ${productionRows.length} biaya produksi, ${wipRows.length} WIP) berhasil diekspor`,
         key: 'export',
       })
     } catch (error) {
@@ -1068,18 +1044,6 @@ export default function MonitoringFormula() {
       render: value => value == null ? '-' : <Text style={currencyTextStyle}>{formatCurrency(value)}</Text>,
     },
     {
-      title: 'Gross Margin',
-      dataIndex: 'gross_margin',
-      key: 'gross_margin',
-      width: 155,
-      align: 'right',
-      render: (_, record) => {
-        if (record.sales_total == null || record.spk_total_cost == null) return '-'
-        const value = Number(record.sales_total) - Number(record.spk_total_cost)
-        return <Text type={value < 0 ? 'danger' : 'success'}>{formatCurrency(value)}</Text>
-      },
-    },
-    {
       title: 'No Hasil Produksi / GP',
       key: 'no_hasil_produksi',
       width: 170,
@@ -1340,6 +1304,18 @@ export default function MonitoringFormula() {
       width: 140,
       align: 'right',
       render: value => <Text strong>{formatCurrency(value)}</Text>,
+    },
+    {
+      title: 'Gross Margin',
+      dataIndex: 'gross_margin',
+      key: 'gross_margin',
+      width: 155,
+      align: 'right',
+      render: (_, record) => {
+        if (record.sales_total == null || record.spk_total_cost == null) return '-'
+        const value = Number(record.sales_total) - Number(record.spk_total_cost)
+        return <Text type={value < 0 ? 'danger' : 'success'}>{formatCurrency(value)}</Text>
+      },
     },
     {
       title: 'Selisih Biaya',
